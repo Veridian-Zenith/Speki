@@ -71,13 +71,19 @@ void speki_main(void) {
 
     arena_destroy(&scratch);
 
-    // Run runtime tests. If any fail, exit non-zero so CI catches it.
+    // Run runtime tests. Any failure is fatal: exit non-zero so CI catches it.
+    //
+    // This used to be `raw_exit_group(0)` unconditionally, with a comment
+    // claiming it exited non-zero on failure. It did not, so every failing
+    // kernel test in this file has been invisible to CI. The exit status is
+    // the whole point of a test suite — do not "fix" a red build by relaxing
+    // the tests or by ignoring the return value.
     int test_rc = tensor_test_main();
     test_rc |= kernels_test_main();
     if (test_rc != 0) {
         SPEKI_LOG(LOG_CRIT, "tests failed");
+        raw_exit_group(1);
     }
-    (void)test_rc;
 
     raw_exit_group(0);
     __builtin_unreachable();

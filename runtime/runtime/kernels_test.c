@@ -198,7 +198,6 @@ int kernels_test_main(void) {
             // Format float as "0.NNN"
             u32 intpart = (u32)max_err;
             u32 frac    = (u32)((max_err - (fp32)intpart) * 1000.0f) % 1000;
-            char buf[16];
             u32 n = 0; char tmp[8];
             if (intpart == 0) tmp[n++] = '0';
             else { while (intpart > 0) { tmp[n++] = '0' + (intpart % 10); intpart /= 10; } }
@@ -356,5 +355,28 @@ int kernels_test_main(void) {
         arena_destroy(&a);
     }
 
-    return 0;
+    // Report the tally, then return the failure count so crt0 can actually
+    // fail the build. Returning 0 here (as this used to) meant a broken kernel
+    // could never gate anything — see the comment in crt0.c.
+    {
+        char msg[64];
+        u32 off = 0;
+        const char* p = "pass=";
+        while (*p && off + 1 < sizeof(msg)) msg[off++] = *p++;
+        // u32 -> decimal
+        char tmp[12];
+        u32 n = 0, v = n_pass;
+        if (v == 0) tmp[n++] = '0';
+        while (v > 0 && n < sizeof(tmp)) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+        while (n > 0) msg[off++] = tmp[--n];
+        p = " fail=";
+        while (*p && off + 1 < sizeof(msg)) msg[off++] = *p++;
+        n = 0; v = n_fail;
+        if (v == 0) tmp[n++] = '0';
+        while (v > 0 && n < sizeof(tmp)) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+        while (n > 0) msg[off++] = tmp[--n];
+        SPEKI_LOG_BUF(LOG_INFO, msg, off);
+    }
+
+    return (int)n_fail;
 }
