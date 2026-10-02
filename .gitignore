@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: OSL-3.0
+# .gitignore — build outputs for speki.
+#
+# speki builds out-of-source into build/. Nothing generated should ever be
+# tracked: the whole point of the project is that the binary is reproducible
+# from source with clang + lld.
+
+# ─── CMake / Ninja out-of-source builds ─────────────────────────────────────
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+
+# ─── Legacy build.sh objects (kept working, redirected under build/) ───────
+*.o
+*.a
+
+# ─── The linked binary ──────────────────────────────────────────────────────
+# Produced by `cmake --build build` or the legacy ./build.sh. Never commit it.
+/speki
+*.elf
+*.bin
+*.hex
+
+# ─── Host-side test binaries ───────────────────────────────────────────────
+speki_kernels_host
+speki-tests
+
+# ─── Rust quantizer workspace ───────────────────────────────────────────────
+tools/quantize/target/
+tools/quantize/Cargo.lock
+
+# ─── Editor / tooling noise ────────────────────────────────────────────────
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ─── Test scratch ──────────────────────────────────────────────────────────
+# Generated corpora and captured activation dumps are large and reproducible.
+corpus/*
+!corpus/.gitkeep
+*.npy
+*.bin
+*.gguf
+*.safetensors
+
+# Keep the directory itself so a fresh clone has somewhere to put a corpus.
+!corpus/.gitkeep
