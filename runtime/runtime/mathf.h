@@ -61,15 +61,21 @@ static inline fp64 speki_exp2i(i32 k) {
 // Input must satisfy |r| <= ln(2)/2 (~0.3466). Horner, degree 7. Taylor's
 // remainder at the interval edge is r^8/8! ≈ 5.2e-9, about 40x below fp32
 // eps — so the polynomial is not the error source, the fp64 reduction is.
+// Horner in fp64, using explicit fma so there is exactly ONE rounding per
+// step. The vector path uses _mm256_fmadd_pd, which also contracts to a
+// single fma — using the builtin here and there keeps the two bit-identical.
+// If this is written as p*r + c and the compiler contracts it, fine; if it
+// does not, the vector and scalar paths would disagree by ~1 ulp per step and
+// the host suite's exact-agreement check would fail.
 static inline fp64 speki_exp_reduced(fp64 r) {
     fp64 p = 1.0 / 5040.0;              // 1/7!
-    p = p * r + 1.0 / 720.0;            // 1/6!
-    p = p * r + 1.0 / 120.0;            // 1/5!
-    p = p * r + 1.0 / 24.0;             // 1/4!
-    p = p * r + 1.0 / 6.0;              // 1/3!
-    p = p * r + 1.0 / 2.0;              // 1/2!
-    p = p * r + 1.0;
-    p = p * r + 1.0;
+    p = __builtin_fma(p, r, 1.0 / 720.0);   // 1/6!
+    p = __builtin_fma(p, r, 1.0 / 120.0);   // 1/5!
+    p = __builtin_fma(p, r, 1.0 / 24.0);    // 1/4!
+    p = __builtin_fma(p, r, 1.0 / 6.0);     // 1/3!
+    p = __builtin_fma(p, r, 1.0 / 2.0);     // 1/2!
+    p = __builtin_fma(p, r, 1.0);
+    p = __builtin_fma(p, r, 1.0);
     return p;
 }
 
@@ -111,7 +117,7 @@ static inline __m256d speki_expd4(__m256d x) {
     __m256d xc = _mm256_min_pd(_mm256_max_pd(x, vlo), vhi);
 
     __m256d vf = _mm256_mul_pd(xc, vlog2e);
-    __m256i ki = _mm256_cvtpd_epi32(vf);
+    __m128i ki = _mm256_cvtpd_epi32(vf);       // 4x i32 packed
     __m256d kd = _mm256_cvtepi32_pd(ki);
 
     // r = x - k*ln2; fnmadd does -(kd*ln2) + xc with a single rounding.
@@ -124,13 +130,25 @@ static inline __m256d speki_expd4(__m256d x) {
     p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 6.0));
     p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 2.0));
     p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
-    p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
+    // Exactly SEVEN steps, matching speki_exp_reduced. An eighth here would
+    // make this degree 9 while the scalar path stayed degree 7, and the two
+    // would then disagree by more than rounding — which is how this bug
+    // happened in the first place.
     __m256d e = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
 
-    // Scale by 2^k: normal fp64 exponent field = k + 1023 at bits 52..62.
-    __m256i kb  = _mm256_add_epi32(ki, _mm256_set1_epi32(1023));
+    // Scale by 2^k: normal fp64 exponent field = k + 1023 in bits 52..62.
+    //
+    // cvtepi32_epi64 sign-extends each i32 into its own 64-bit lane (AVX2
+    // VPMOVSXDQ). Do NOT shortcut this with _mm256_slli_epi64 on the packed
+    // i32: that shifts each 64-bit lane as a unit, so the i32s sitting in the
+    // HIGH halves (k1, k3) get pushed out of the register and k0/k2 end up
+    // duplicated into both lanes. That silently scrambles every lane but the
+    // first.
+    __m128i kb  = _mm_add_epi32(ki, _mm_set1_epi32(1023));
     __m256i k64 = _mm256_slli_epi64(_mm256_cvtepi32_epi64(kb), 52);
-    __m256d out = _mm256_mul_pd(e, _mm256_castsi256_pd(k64));
+    __m256d s   = _mm256_castsi256_pd(k64);
+
+    __m256d out = _mm256_mul_pd(e, s);
 
     // Fixups compare the ORIGINAL x, so NaN inputs are left alone.
     out = _mm256_blendv_pd(out, _mm256_set1_pd(SPEKI_INF),
@@ -143,12 +161,16 @@ static inline __m256d speki_expd4(__m256d x) {
 //
 // AVX2 fp64 is 4 lanes per register, so 8 fp32 lanes take two passes. Lanes
 // stay fp64 throughout and narrow once at the end, matching the scalar path.
+// _mm256_cvtpd_ps narrows only 4 lanes, so each fp32 half is narrowed on its
+// own and the two results are spliced. (Narrowing the joined fp64 pair would
+// silently discard half the lanes.)
 static inline __m256 speki_exp8_ps(__m256 x) {
-    __m128d lo = _mm256_castps256_ps128(x);
-    __m128d hi = _mm256_extractf128_ps(x, 1);
-    __m256d rlo = speki_expd4(_mm256_cvtps_pd(lo));
-    __m256d rhi = speki_expd4(_mm256_cvtps_pd(hi));
-    return _mm256_cvtpd_ps(_mm256_insertf128_pd(rlo, rhi, 1));
+    __m128 flo = _mm256_castps256_ps128(x);          // lanes 0..3
+    __m128 fhi = _mm256_extractf128_ps(x, 1);        // lanes 4..7
+    __m128 nlo = _mm256_cvtpd_ps(speki_expd4(_mm256_cvtps_pd(flo)));
+    __m128 nhi = _mm256_cvtpd_ps(speki_expd4(_mm256_cvtps_pd(fhi)));
+    // _mm256_castps128_ps256 zero-extends; the extract-cast goes the other way.
+    return _mm256_insertf128_ps(_mm256_castps128_ps256(nlo), nhi, 1);
 }
 
 // speki_exp_arr_ps — exp over an fp32 array, 8 lanes per iteration plus a
@@ -157,12 +179,8 @@ __attribute__((no_stack_protector, noinline))
 static void speki_exp_arr_ps(fp32* out, const fp32* in, u32 n) {
     u32 i = 0;
     for (; i + 8 <= n; i += 8) {
-        __m256 v   = _mm256_loadu_ps(in + i);
-        __m128d lo = _mm256_castps256_ps128(v);
-        __m128d hi = _mm256_extractf128_ps(v, 1);
-        __m256d r  = _mm256_insertf128_pd(speki_expd4(_mm256_cvtps_pd(lo)),
-                                          speki_expd4(_mm256_cvtps_pd(hi)), 1);
-        _mm256_storeu_ps(out + i, _mm256_cvtpd_ps(r));
+        _mm256_storeu_ps(out + i,
+            speki_exp8_ps(_mm256_loadu_ps(in + i)));
     }
     for (; i < n; i++) out[i] = speki_expf(in[i]);
 }
