@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: OSL-3.0
+# Install a specific LLVM toolchain from apt.llvm.org.
+#
+# WHY THIS EXISTS
+# ───────────────
+# ubuntu-24.04 (what ubuntu-latest runs) ships clang 16, 17 and 18, and the
+# runner team has said they will not add newer ones. That is a problem for a
+# project that wants to use the newest C dialect: clang 18 predates the `0o`
+# octal literal prefix (added in clang 21), so it rejects it outright --
+#
+#     error: invalid suffix 'o2000000' on integer constant
+#
+# and tops out at -std=c2x, so -std=c2y is rejected too.
+#
+# The alternative to installing a newer compiler is to never use anything newer
+# than clang 18. That is worse: it means the language features available in
+# development are the ones we cannot test.
+#
+# So: install from apt.llvm.org, which publishes packages for noble.
+#
+# INPUTS
+#   version        LLVM major version to install, e.g. "23". Default 23.
+#   packages       extra packages to install alongside. Default empty.
+#   fallback_ok    if "true", fall back to the stock compiler when the requested
+#                  version is unavailable, instead of failing. Default false.
+#                  Use for jobs that should still run on an older toolchain.
+
+name: "Setup LLVM toolchain"
+description: "Install clang/lld/clang-tidy of a given major version from apt.llvm.org"
+
+inputs:
+  version:
+    description: "LLVM major version, e.g. 23"
+    required: false
+    default: "23"
+  packages:
+    description: "Extra packages to install alongside clang/lld/clang-tidy"
+    required: false
+    default: ""
+  fallback_ok:
+    description: "Fall back to the stock compiler instead of failing"
+    required: false
+    default: "false"
+
+outputs:
+  clang_path:
+    description: "Resolved clang binary (the requested version, or the stock one)"
+    value: ${{ steps.setup.outputs.clang_path }}
+  version_used:
+    description: "Major version actually in use, or 'stock'"
+    value: ${{ steps.setup.outputs.version_used }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure apt.llvm.org
+      shell: bash
+      run: |
+        set -euo pipefail
+        VER="${{ inputs.version }}"
+
+        # The LLVM archive signing key. Fetched over https and verified against
+        # the fingerprint below rather than trusted blindly.
+        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+          -o /tmp/llvm.key
+
+        # Fingerprint of the LLVM archive key. If this ever fails to match, the
+        # key was rotated and a human needs to look -- that is the point of
+        # pinning it.
+        EXPECTED="6084F3CF814B57C1CF12EFD515CF4DAF4F7421"
+        ACTUAL=$(gpg --show-keys --with-colons /tmp/llvm.key \
+                 | awk -F: '/^fpr:/{print $10; exit}')
+        if [ "$ACTUAL" != "$EXPECTED" ]; then
+          echo "::error::apt.llvm.org key fingerprint mismatch."
+          echo "  expected $EXPECTED"
+          echo "  actual   $ACTUAL"
+          echo "The LLVM archive key may have been rotated. Verify before trusting."
+          exit 1
+        fi
+
+        sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg /tmp/llvm.key
+
+        # codename is read from the runner rather than hardcoded, so this keeps
+        # working if the base image moves.
+        CODENAME=$(lsb_release -cs)
+        echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${VER} main" \
+          | sudo tee /etc/apt/sources.list.d/llvm-${VER}.list > /dev/null
+
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          "clang-${VER}" "lld-${VER}" "clang-tidy-${VER}"
+        echo "installed LLVM ${VER} for ${CODENAME}"
+
+    - name: Resolve the compiler
+      id: setup
+      shell: bash
+      run: |
+        set -euo pipefail
+        VER="${{ inputs.version }}"
+        FALLBACK="${{ inputs.fallback_ok }}"
+
+        if command -v "clang-${VER}" > /dev/null 2>&1; then
+          echo "clang_path=$(command -v clang-${VER})" >> "$GITHUB_OUTPUT"
+          echo "version_used=${VER}"                  >> "$GITHUB_OUTPUT"
+        elif [ "$FALLBACK" = "true" ]; then
+          echo "::warning::clang-${VER} unavailable; using the stock compiler"
+          echo "clang_path=$(command -v clang)" >> "$GITHUB_OUTPUT"
+          echo "version_used=stock"              >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::clang-${VER} is not available and fallback_ok is false"
+          exit 1
+        fi
+
+        echo "using $("$(cat "${{ steps.setup.outputs.clang_path }}")" --version | head -1)"
+        # shellcheck disable=SC2129
+        echo "clang_path=$(cat "${{ steps.setup.outputs.clang_path }}")" >> "$GITHUB_OUTPUT"
+        echo "version_used=${{ steps.setup.outputs.version_used }}" >> "$GITHUB_OUTPUT"
+
+    - name: Point CMake at the chosen compiler
+      # CMake bakes the compiler into the cache on first configure, so this has
+      # to be passed at configure time rather than exported into the environment.
+      shell: bash
+      run: |
+        echo "CC=${{ steps.setup.outputs.clang_path }}" >> "$GITHUB_ENV"
+        echo "LLVM_BIN_DIR=$(dirname "${{ steps.setup.outputs.clang_path }}")" >> "$GITHUB_ENV"
+        # lld is named lld-NN; put its directory on PATH so -fuse-ld=lld works.
+        echo "$LLVM_BIN_DIR" >> "$GITHUB_PATH"

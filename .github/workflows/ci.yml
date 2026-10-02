@@ -20,11 +20,30 @@
 # check structural properties; the host suite checks numerical accuracy
 # against an independent __float128 reference. A kernel has to satisfy both.
 #
-# NOTE ON THE TOOLCHAIN: no clang version is pinned.
-# cmake/SpekiFlags.cmake probes for the newest C dialect the compiler actually
-# supports (c2y, else c2x, else c17), so this works on old and new runners
-# alike. Pinning a dialect the runner's clang does not know is exactly what
-# broke CI before.
+# ─── WHY THE TOOLCHAIN IS INSTALLED RATHER THAN USED AS-IS ────────────────
+# ubuntu-24.04 ships clang 16, 17 and 18, and the runner team will not add
+# newer ones. clang 18 is too old for this project on two counts:
+#
+#   - it predates the C23 `0o` octal literal prefix (added in clang 21), so it
+#     rejects it:  error: invalid suffix 'o2000000' on integer constant
+#   - it tops out at -std=c2x, so -std=c2y (C26) is rejected outright
+#
+# Every job therefore installs a current clang from apt.llvm.org via
+# ./.github/actions/setup-llvm, and SPEKI_LLVM_VERSION is the single place that
+# version is set.
+#
+# There is deliberately NO old-toolchain job. Two reasons:
+#
+#   - Silent degradation is how discrepancies get in. A build that passed on
+#     clang 23 and quietly built something different on clang 18 is exactly how
+#     the 0o problem reached CI in the first place.
+#   - Old compilers carry known CVEs. Pinning CI to one is a supply-chain
+#     liability, not just an inconvenience.
+#
+# The build REQUIRES c2y: cmake/SpekiFlags.cmake fails with an actionable
+# message instead of downgrading the dialect when the compiler cannot provide
+# it. SPEKI_CSTD may still be set explicitly, but a downgrade has to be asked
+# for rather than fallen into.
 
 name: CI
 
@@ -45,6 +64,8 @@ concurrency:
 
 env:
   BUILD_DIR: build/cmake
+  # The LLVM major version every job installs. See the header note.
+  SPEKI_LLVM_VERSION: "23"
 
 jobs:
   build:
@@ -54,12 +75,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld cmake ninja-build
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.SPEKI_LLVM_VERSION }}
 
       - name: Configure
-        run: cmake -B ${{ env.BUILD_DIR }} --preset dev
+        run: |
+          cmake -B ${{ env.BUILD_DIR }} --preset dev \
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
 
       - name: Build
         run: cmake --build ${{ env.BUILD_DIR }}
@@ -128,12 +151,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld cmake ninja-build
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.SPEKI_LLVM_VERSION }}
 
       - name: Configure
-        run: cmake -B ${{ env.BUILD_DIR }} --preset dev
+        run: |
+          cmake -B ${{ env.BUILD_DIR }} --preset dev \
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
 
       - name: Build the host accuracy suite
         run: cmake --build ${{ env.BUILD_DIR }} --target speki_kernels_host
@@ -158,12 +183,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld cmake ninja-build clang-tidy
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.SPEKI_LLVM_VERSION }}
 
       - name: Configure (for compile_commands.json)
-        run: cmake -B ${{ env.BUILD_DIR }} --preset dev
+        run: |
+          cmake -B ${{ env.BUILD_DIR }} --preset dev \
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
 
       - name: Run clang-tidy
         # The check list and the reasoning behind it live in .clang-tidy.
@@ -171,7 +198,7 @@ jobs:
           set -euo pipefail
           fail=0
           for f in runtime/crt/*.c runtime/runtime/*.c; do
-            clang-tidy -p ${{ env.BUILD_DIR }} "$f" || fail=1
+            "clang-tidy-${{ env.SPEKI_LLVM_VERSION }}" -p ${{ env.BUILD_DIR }} "$f" || fail=1
           done
           exit $fail
 
@@ -182,12 +209,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld cmake ninja-build
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.SPEKI_LLVM_VERSION }}
 
       - name: Configure (release)
-        run: cmake -B build/release --preset release
+        run: |
+          cmake -B build/release --preset release \
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
 
       - name: Build
         run: cmake --build build/release

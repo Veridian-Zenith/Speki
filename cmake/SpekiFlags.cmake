@@ -61,48 +61,45 @@ endfunction()
 # freestanding and must not silently depend on GNU extensions.
 
 function(speki_detect_cstd)
-  # An explicit SPEKI_CSTD (cache var or env) pins the dialect; skip the probe.
-  # Test for EMPTY, not for undefinedness: speki_default() always defines the
-  # variable (to "" when nothing was requested), so `if(NOT DEFINED ...)` would
-  # never fire.
+  # We require a current toolchain rather than degrading to an older dialect.
+  #
+  # The earlier version of this probed c2y -> c2x -> c17 and took the first that
+  # compiled. That is the wrong policy for two reasons:
+  #
+  #   - A silent fallback means a build that passed on clang 23 can quietly
+  #     build something different on clang 18, with no signal. That is how the
+  #     0o-literal discrepancy got in: local clang 23 accepted it, CI clang 18
+  #     did not, and only CI found out.
+  #   - Old compilers carry known CVEs. A build pinned to one is a supply-chain
+  #     liability, not just a maintenance annoyance.
+  #
+  # So: assert the dialect, and fail here with an actionable message if the
+  # compiler cannot provide it. SPEKI_CSTD may still be set explicitly, for a
+  # deliberate downgrade -- but it has to be asked for, not fallen into.
   if(NOT "${SPEKI_CSTD}" STREQUAL "")
     message(STATUS "speki: C dialect pinned to ${SPEKI_CSTD}")
     return()
   endif()
 
-  # Ask the compiler directly which dialects it accepts. Newest first:
-  #   c2y = C26 (__STDC_VERSION__ 202400)
-  #   c2x = C23 (202311)
-  #   c17 = last dialect every current compiler supports
-  #
-  # ISO dialects only, never gnu*: speki is freestanding and must not pick up a
-  # GNU extension by accident.
-  set(candidates c2y c2x c17)
+  include(CheckCSourceCompiles)
 
-  # Minimal valid program; the probe only cares whether -std=<dialect> parses.
-  set(probe "${CMAKE_CURRENT_BINARY_DIR}/.speki_cstd_probe.c")
-  file(WRITE "${probe}" "int main(void) { return 0; }\n")
+  set(CMAKE_REQUIRED_FLAGS "-std=c2y")
+  set(CMAKE_REQUIRED_QUIET ON)
+  check_c_source_compiles("int main(void) { return 0; }" SPEKI_C2Y_AVAILABLE)
+  unset(CMAKE_REQUIRED_FLAGS)
 
-  foreach(cand IN LISTS candidates)
-    # -Werror plus a known-good program, so the only thing that can fail is the
-    # dialect flag itself being unknown to this compiler.
-    execute_process(
-      COMMAND ${CMAKE_C_COMPILER} -std=${cand} -Werror -fsyntax-only
-              "${probe}"
-      RESULT_VARIABLE rc
-      OUTPUT_VARIABLE out
-      ERROR_VARIABLE  err)
-
-    if(rc EQUAL 0)
-      set(SPEKI_CSTD "${cand}" CACHE STRING "Detected C dialect" FORCE)
-      message(STATUS "speki: using C dialect ${cand}")
-      return()
-    endif()
-  endforeach()
+  if(SPEKI_C2Y_AVAILABLE)
+    set(SPEKI_CSTD "c2y" CACHE STRING "C dialect" FORCE)
+    message(STATUS "speki: using C dialect c2y (C26)")
+    return()
+  endif()
 
   message(FATAL_ERROR
-    "speki: no usable C dialect. Tried: ${candidates}. "
-    "Set SPEKI_CSTD explicitly, e.g. -DSPEKI_CSTD=c17.")
+    "speki: this compiler does not support -std=c2y (C26).\n"
+    "CI installs a current clang from apt.llvm.org; do the same locally, or "
+    "set SPEKI_CSTD=c2x to build against C23 explicitly.\n"
+    "Note that clang < 21 also rejects the 0o octal prefix, so a C23 build "
+    "needs the codebase kept free of C23-only spellings.")
 endfunction()
 
 # ─── Kernels ────────────────────────────────────────────────────────────────
