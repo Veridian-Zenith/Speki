@@ -196,15 +196,17 @@ static inline i32 raw_openat(i32 dirfd, const char* path, i32 flags, u32 mode) {
     return (i32)SPEKI_SYSCALL4(SYS_openat, dirfd, path, flags, mode);
 }
 
+// 0o prefix, not bare leading-zero: C26 deprecates the old octal spelling
+// (-Wdeprecated-octal-literals). Values unchanged.
 #define O_RDONLY  0
 #define O_WRONLY  1
 #define O_RDWR    2
-#define O_CREAT   0100
-#define O_EXCL    0200
-#define O_TRUNC   01000
-#define O_APPEND  02000
-#define O_NONBLOCK 04000
-#define O_CLOEXEC 02000000
+#define O_CREAT   0o100
+#define O_EXCL    0o200
+#define O_TRUNC   0o1000
+#define O_APPEND  0o2000
+#define O_NONBLOCK 0o4000
+#define O_CLOEXEC 0o2000000
 #define AT_FDCWD  -100
 
 static inline i32 raw_close(i32 fd) {
@@ -256,18 +258,34 @@ static inline i32 raw_mlock(void* addr, usize len) {
     return (i32)SPEKI_SYSCALL2(SYS_mlock, addr, len);
 }
 
-// struct timespec — kernel ABI shape. Must be defined before any inline
-// function that takes a pointer to it.
+// The build must work BOTH freestanding (no system headers at all) and
+// hosted (the host test suite links against libm and includes <math.h>,
+// which transitively pulls in glibc's own timespec via <sys/types.h>).
 //
-// We define it as a real `struct` with the kernel's exact field layout
-// (long tv_sec, long tv_nsec on x86_64). If a system header has already
-// included its own timespec, our definition would conflict; in that case
-// the compiler's standard one takes precedence and we don't define ours.
+// Guarding on someone else's macro does NOT work in either direction. We are
+// included FIRST, so any libc guard macro (_STRUCT_TIMESPEC,
+// __struct_timespec_defined, _SYS_TIMESPEC_H) is still unset when we get
+// here — we define the struct, and then glibc defines its own on the way to
+// <sys/types.h>, which is a redefinition error. Conversely, in a freestanding
+// build no libc will ever show up to set those macros for us.
+//
+// So the condition is not "has timespec been defined" but "am I freestanding":
+//
+//   freestanding -> define it ourselves, kernel ABI layout, no libc
+//   hosted       -> include <time.h> and let the C library own the type
+//
+// Both layouts are identical on x86-64 (two longs), so code in this header
+// works unchanged either way.
+
+#ifdef __speki_freestanding__
 #ifndef _SYS_TIMESPEC_H
 struct timespec {
     long tv_sec;
     long tv_nsec;
 };
+#endif
+#else
+#include <time.h>
 #endif
 
 #define CLOCK_REALTIME  0

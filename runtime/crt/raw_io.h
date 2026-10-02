@@ -15,15 +15,21 @@
 #include "raw_syscalls.h"
 
 // Speki-flavored openat flag aliases (kernel ABI constants, not redefined).
+//
+// These are written with the 0o prefix rather than a leading zero. A bare
+// leading-zero literal is the old octal spelling, which C26 deprecates
+// (-Wdeprecated-octal-literals); under -std=c2y with -Werror that is a build
+// failure, not a warning. The VALUES are unchanged: 0o100 == 0100 == 64, and
+// 0o2000000 == 02000000 == O_CLOEXEC.
 #define O_RDONLY_RAW   0
 #define O_WRONLY_RAW   1
 #define O_RDWR_RAW     2
-#define O_CREAT_RAW    0100
-#define O_EXCL_RAW     0200
-#define O_TRUNC_RAW    01000
-#define O_APPEND_RAW   02000
-#define O_NONBLOCK_RAW 04000
-#define O_CLOEXEC_RAW  02000000
+#define O_CREAT_RAW    0o100
+#define O_EXCL_RAW     0o200
+#define O_TRUNC_RAW    0o1000
+#define O_APPEND_RAW   0o2000
+#define O_NONBLOCK_RAW 0o4000
+#define O_CLOEXEC_RAW  0o2000000
 #define AT_FDCWD_RAW   -100
 
 // raw_pread64(fd, buf, len, off) → bytes read, 0 on EOF, -errno on error
