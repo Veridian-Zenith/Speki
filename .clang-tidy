@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: OSL-3.0
+# .clang-tidy — static analysis policy for speki.
+#
+# Run manually:   clang-tidy -p build/cmake runtime/**/*.c
+# Or via just:    just tidy
+#
+# The check list is deliberately narrow. speki is freestanding C with
+# intrinsics, so a large fraction of the default checks are either wrong for
+# this codebase or unactionable:
+#
+#   - readability-*  wants identifiers renamed and braces added everywhere;
+#                   the kernel style is deliberate and terse.
+#   - modernize-*    wants C23 library facilities we do not have, because
+#                   there is no libc.
+#   - cppcoreguidelines-*  assumes a hosted C++ environment.
+#
+# What IS worth enforcing is the class of bug that has actually bitten this
+# codebase: intrinsics misused in ways that compile cleanly and produce wrong
+# numbers. See the clang-analyzer-* and bugprone-* entries below.
+#
+# To see what a new check would flag before enabling it permanently:
+#   clang-tidy -checks='<name>' -p build/cmake runtime/runtime/kernels.h
+
+Checks: >
+    -*,
+    bugprone-*,
+    clang-analyzer-*,
+    concurrency-*,
+    cppcoreguidelines-init-variables,
+    misc-*,
+    performance-*,
+    portability-*,
+    readability-braces-around-statements,
+    readability-else-after-return,
+    readability-inconsistent-declaration-parameter-name,
+    readability-redundant-control-flow,
+    readability-redundant-declaration,
+    readability-static-accessed-through-instance,
+    readability-uniqueptr-delete-release,
+
+# ─── Suppressions ───────────────────────────────────────────────────────────
+#
+# Format: a check is disabled for code matching the regex in Key.
+#
+# Only checks that are ACTUALLY ENABLED may appear here — clang-tidy rejects a
+# suppression for a check that is not in the list above it, which is a confusing
+# error to debug. If you want to silence something, enable it first, then
+# suppress it.
+
+# Header-only inline kernels are unused in any single TU, which is exactly
+# what a header is for. This fires on every one of them.
+HeaderIsUnused:           false
+
+# We use our own typedefs (u8/u32/fp32) rather than <stdint.h> types, because
+# there are no system headers. Reads like noise to the pointer-arith checks.
+cppcoreguidelines-pro-type-reinterpret-cast: false
+
+# ─── HeaderFilterRegex ─────────────────────────────────────────────────────
+#
+# Only report diagnostics that come from our own headers, not from clang's
+# <immintrin.h>, which is full of intentional-looking casts.
+
+HeaderFilterRegex:        'runtime/(crt|runtime)/.*\.(h|c)$'
+FormatStyle:               file
