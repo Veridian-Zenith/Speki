@@ -106,23 +106,15 @@ jobs:
       - name: Build
         run: cmake --build ${{ env.BUILD_DIR }}
 
-      - name: Report the runner CPU
-        # The binary is built for -march=alderlake. If it ever dies with an
-        # illegal instruction on a runner, this is what says why -- a runner
-        # CPU without one of those extensions looks identical to a code bug.
+      - name: Report the toolchain and CPU
+        # Worth keeping even though the arch is now fixed: when a runner image
+        # changes, "which CPU was this and what did we target" is the first
+        # question. A SIGILL in a freestanding binary built for a specific -march
+        # almost always means the CPU is not the one it was built for.
         run: |
-          echo "== CPU =="
-          lscpu | grep -E 'Model name|Flags' | sed 's/^/  /'
-          echo ""
-          echo "== required by -march=alderlake but missing here =="
-          FLAGS=$(lscpu | grep -o '^Flags:.*' | cut -d: -f2-)
-          for f in avx2 fma f16c bmi bmi2 adx gfni vaes pclmul; do
-            case " $FLAGS " in
-              *" $f "*) : ;;
-              *) echo "  MISSING: $f" ;;
-            esac
-          done
-          echo "  (nothing listed above means the runner supports all of them)"
+          echo "compiler: $(clang-${{ env.SPEKI_LLVM_VERSION }} --version | head -1)"
+          echo "target:   SPEKI_ARCH=${{ env.SPEKI_ARCH_CI }}"
+          echo "cpu:      $(lscpu | grep -oE 'Model name:.*' | cut -d: -f2- | xargs)"
 
       - name: Run kernel tests (freestanding)
         # No libc in this binary, so passing here proves the kernels work
