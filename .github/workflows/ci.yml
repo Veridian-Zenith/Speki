@@ -87,10 +87,39 @@ jobs:
       - name: Build
         run: cmake --build ${{ env.BUILD_DIR }}
 
+      - name: Report the runner CPU
+        # The binary is built for -march=alderlake. If it ever dies with an
+        # illegal instruction on a runner, this is what says why -- a runner
+        # CPU without one of those extensions looks identical to a code bug.
+        run: |
+          echo "== CPU =="
+          lscpu | grep -E 'Model name|Flags' | sed 's/^/  /'
+          echo ""
+          echo "== required by -march=alderlake but missing here =="
+          FLAGS=$(lscpu | grep -o '^Flags:.*' | cut -d: -f2-)
+          for f in avx2 fma f16c bmi bmi2 adx gfni vaes pclmul; do
+            case " $FLAGS " in
+              *" $f "*) : ;;
+              *) echo "  MISSING: $f" ;;
+            esac
+          done
+          echo "  (nothing listed above means the runner supports all of them)"
+
       - name: Run kernel tests (freestanding)
         # No libc in this binary, so passing here proves the kernels work
         # without one. The exit status is the gate: crt0.c exits 1 on failure.
-        run: ./build/speki
+        #
+        # 132 = 128 + 4 = SIGILL, i.e. an illegal instruction. That is either
+        # a CPU missing an extension we compiled for, or a genuine #GP. Print
+        # the CPU first so the two are distinguishable.
+        run: |
+          set +e
+          ./build/speki
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::speki exited $rc ($((rc-128)) = $(kill -l $((rc-128)) 2>/dev/null))"
+          fi
+          exit $rc
 
       - name: Verify the binary is genuinely freestanding
         run: |

@@ -47,14 +47,6 @@ Checks: >
 # error to debug. If you want to silence something, enable it first, then
 # suppress it.
 
-# Header-only inline kernels are unused in any single TU, which is exactly
-# what a header is for. This fires on every one of them.
-HeaderIsUnused:           false
-
-# We use our own typedefs (u8/u32/fp32) rather than <stdint.h> types, because
-# there are no system headers. Reads like noise to the pointer-arith checks.
-cppcoreguidelines-pro-type-reinterpret-cast: false
-
 # ─── HeaderFilterRegex ─────────────────────────────────────────────────────
 #
 # Only report diagnostics that come from our own headers, not from clang's
