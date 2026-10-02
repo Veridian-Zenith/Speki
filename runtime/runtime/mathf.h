@@ -174,8 +174,16 @@ static inline __m256 speki_exp8_ps(__m256 x) {
 }
 
 // speki_exp_arr_ps — exp over an fp32 array, 8 lanes per iteration plus a
-// scalar tail. This is the entry point kernels use.
-__attribute__((no_stack_protector, noinline))
+// scalar tail.
+// Array-at-a-time exp. Currently only the host accuracy suite calls this;
+// the kernels use speki_exp8_ps / speki_expf directly, so in the freestanding
+// binary this is unreferenced.
+//
+// unused is spelled __attribute__((unused)) rather than [[maybe_unused]]
+// deliberately: the C23 attribute is unavailable under -std=c17, and the
+// __attribute__ form of maybe_unused is rejected outright under -std=c2y. The
+// portable spelling that works in every dialect we support is this one.
+__attribute__((no_stack_protector, noinline, unused))
 static void speki_exp_arr_ps(fp32* out, const fp32* in, u32 n) {
     u32 i = 0;
     for (; i + 8 <= n; i += 8) {

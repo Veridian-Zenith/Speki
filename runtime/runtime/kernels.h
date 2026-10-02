@@ -35,6 +35,7 @@
 #include "types.h"
 #include "tensor.h"
 #include "f16c.h"
+#include "mathf.h"
 
 #include <immintrin.h>  // AVX2 + FMA + F16C intrinsics, header-only
 
@@ -172,68 +173,37 @@ void gemm_f16_f32(fp32* __restrict__ C, const fp16* __restrict__ A,
 
 // ─── silu_f32: y = x * sigmoid(x) (element-wise) ──────────────────────────
 //
-// sigmoid(x) = 1 / (1 + exp(-x))
-// We use the tanh-based form: 1 / (1 + exp(-x)) but compute via
-// _mm256_sigmoid_ps equivalent: exp(-x) ≈ rational approximation.
-// For our scale, the simple tanh approach via 2*sigmoid(2x) - 1 form is
-// fine, but we can also use a polynomial. We just call the libm-free
-// intrinsics for AVX2.
+// silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
 //
-// Simpler: use the identity silu(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) *
-// (x + 0.044715*x^3))), but that requires tanh. Without libm, we have
-// to roll our own sigmoid.
+// Computed with mathf.h's exp, which is exact to ~1 ulp of fp32 across the
+// whole range. There is no clamping and no polynomial here any more: the
+// previous version evaluated a 5-term Taylor series over a [-8, 8] clamp,
+// which is invalid outside |x| < 1 and returned NEGATIVE values for x > ~1.5
+// (at x = 3.5 it produced -5.4259 where silu(3.5) = 3.3974).
 //
-// We use a quick Padé-style rational approximation for exp:
+// Asymptotics are handled by exp itself: for large positive x, exp(-x)
+// underflows to 0 and sigmoid -> 1, which is correct. For large negative x,
+// exp(-x) overflows to +inf and x/inf -> -0.0, also correct. Neither needs a
+// special case here.
+//
+// tanh-based formulations are deliberately NOT used: they would need tanh,
+// which means another transcendental to hand-roll for no accuracy gain.
+
 __attribute__((no_stack_protector, noinline))
 void silu_f32(fp32* x, u32 n) {
-    for (u32 i = 0; i + 8 <= n; i += 8) {
-        __m256 v = _mm256_loadu_ps(x + i);
-        // Compute exp(-v) via bit-trick: exp(v) ≈ 2^(v * log2(e))
-        // log2(e) ≈ 1.4426950408889634
-        // 2^x via AVX2 _mm256_exp2a23_ps approximation would be ideal;
-        // we don't have that on Alder Lake. So use a polynomial:
-        // exp(v) ≈ 1 + v + v^2/2 + v^3/6 + v^4/24 (4 terms, |v| < 1)
-        // For -v with v in typical hidden-dim range [-10, 10], we need
-        // better; let's use the bit trick instead.
-        __m256 neg_v = _mm256_sub_ps(_mm256_setzero_ps(), v);
-
-        // 2^(neg_v * log2(e)) = 2^(neg_v * 1.4426950)
-        // AVX2 has no _mm256_exp2_ps. We approximate via polynomial of
-        // degree 5 for the fractional part + integer clamping.
-        //
-        // Simple fast path: clamp to [-8, 8] (very small outside this),
-        // use a Padé rational.
-        __m256 y = _mm256_min_ps(_mm256_max_ps(neg_v,
-                            _mm256_set1_ps(-8.0f)),
-                            _mm256_set1_ps( 8.0f));
-
-        // exp(y) ≈ 1 + y + y²/2 + y³/6 + y⁴/24 + y⁵/120
-        __m256 y2 = _mm256_mul_ps(y, y);
-        __m256 y3 = _mm256_mul_ps(y2, y);
-        __m256 y4 = _mm256_mul_ps(y2, y2);
-        __m256 y5 = _mm256_mul_ps(y4, y);
-
-        __m256 poly = _mm256_set1_ps(1.0f);
-        poly = _mm256_fmadd_ps(y,  poly, _mm256_set1_ps(1.0f));   // 1 + y
-        poly = _mm256_fmadd_ps(y2, poly, _mm256_set1_ps(0.5f));   // + y²/2
-        poly = _mm256_fmadd_ps(y3, poly, _mm256_set1_ps(0.166666667f));
-        poly = _mm256_fmadd_ps(y4, poly, _mm256_set1_ps(0.041666667f));
-        poly = _mm256_fmadd_ps(y5, poly, _mm256_set1_ps(0.008333333f));
-
-        // sigmoid = 1 / (1 + exp(-x)) = 1 / (1 + exp_neg)
-        __m256 sigmoid = _mm256_div_ps(_mm256_set1_ps(1.0f),
-                                       _mm256_add_ps(_mm256_set1_ps(1.0f), poly));
-
-        __m256 result = _mm256_mul_ps(v, sigmoid);
-        _mm256_storeu_ps(x + i, result);
+    u32 i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 v    = _mm256_loadu_ps(x + i);
+        __m256 neg  = _mm256_sub_ps(_mm256_setzero_ps(), v);
+        __m256 ex   = speki_exp8_ps(neg);
+        __m256 den  = _mm256_add_ps(_mm256_set1_ps(1.0f), ex);
+        // v / (1 + exp(-v))
+        __m256 sig  = _mm256_div_ps(_mm256_set1_ps(1.0f), den);
+        _mm256_storeu_ps(x + i, _mm256_mul_ps(v, sig));
     }
-    for (u32 i = (n & ~7u); i < n; i++) {
+    for (; i < n; i++) {
         fp32 v = x[i];
-        fp32 ev = (v > 8.0f) ? 1.0f : (v < -8.0f ? 0.0f :
-            1.0f + v + v*v*0.5f + v*v*v*0.166666667f
-            + v*v*v*v*0.041666667f + v*v*v*v*v*0.008333333f);
-        // ev = exp(-v) computed above; sigmoid = 1/(1+ev)
-        x[i] = v * (1.0f / (1.0f + ev));
+        x[i] = v * (1.0f / (1.0f + speki_expf(-v)));
     }
 }
 
@@ -250,53 +220,47 @@ void softmax_f32(fp32* x, u32 n) {
     if (n == 0) return;
 
     // Find max.
-    __m256 vmax = _mm256_set1_ps(x[0]);
-    u32 i = 0;
-    for (; i + 8 <= n; i += 8) {
-        vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(x + i));
-    }
-    fp32 maxv = hmax8(vmax);
-    for (; i < n; i++) {
-        if (x[i] > maxv) maxv = x[i];
-    }
+        //
+        // This MUST be hmax8, not hsum8. The previous version called hsum8 here,
+        // which sums the 8 lanes instead of maximising them: for the test input
+        // x = i*0.3 (i < 16) it produced a "maximum" of 27.6 where the true max
+        // was 4.5. Every subsequent exp(x - 27.6) then hit the clamp, all 16
+        // outputs collapsed to the same value, and the row went uniform. The
+        // test only noticed because softmax_order failed while
+        // softmax_sums_to_1 passed — uniform output still sums to 1.
+        __m256 vmax = _mm256_set1_ps(x[0]);
+        u32 i = 0;
+        for (; i + 8 <= n; i += 8) {
+            vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(x + i));
+        }
+        fp32 maxv = hmax8(vmax);
+        for (; i < n; i++) {
+            if (x[i] > maxv) maxv = x[i];
+        }
 
-    // Compute exp(x_i - max) and accumulate sum.
-    __m256 vsum = _mm256_setzero_ps();
-    __m256 vmaxv = _mm256_set1_ps(maxv);
-    i = 0;
-    for (; i + 8 <= n; i += 8) {
-        __m256 v = _mm256_sub_ps(_mm256_loadu_ps(x + i), vmaxv);
-        // Clamp to [-8, 0] before exp to avoid extreme values.
-        v = _mm256_min_ps(v, _mm256_set1_ps(0.0f));
-        v = _mm256_max_ps(v, _mm256_set1_ps(-8.0f));
+        // Compute exp(x_i - max) and accumulate sum.
+        __m256 vsum  = _mm256_setzero_ps();
+        __m256 vmaxv = _mm256_set1_ps(maxv);
+        i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m256 v = _mm256_sub_ps(_mm256_loadu_ps(x + i), vmaxv);
+            // No clamp needed: subtracting the max guarantees v <= 0, so exp
+            // cannot overflow, and underflow to 0 is the correct answer for
+            // negligible terms.
+            __m256 e = speki_exp8_ps(v);
+            _mm256_storeu_ps(x + i, e);
+            vsum = _mm256_add_ps(vsum, e);
+        }
+        for (; i < n; i++) {
+            x[i] = speki_expf(x[i] - maxv);
+        }
+        fp32 sum = hsum8(vsum);
+        for (u32 j = (n & ~7u); j < n; j++) sum += x[j];
 
-        // 5-term polynomial exp approximation.
-        __m256 y = v;
-        __m256 y2 = _mm256_mul_ps(y, y);
-        __m256 y3 = _mm256_mul_ps(y2, y);
-        __m256 y4 = _mm256_mul_ps(y2, y2);
-        __m256 y5 = _mm256_mul_ps(y4, y);
-        __m256 poly = _mm256_set1_ps(1.0f);
-        poly = _mm256_fmadd_ps(y,  poly, _mm256_set1_ps(1.0f));
-        poly = _mm256_fmadd_ps(y2, poly, _mm256_set1_ps(0.5f));
-        poly = _mm256_fmadd_ps(y3, poly, _mm256_set1_ps(0.166666667f));
-        poly = _mm256_fmadd_ps(y4, poly, _mm256_set1_ps(0.041666667f));
-        poly = _mm256_fmadd_ps(y5, poly, _mm256_set1_ps(0.008333333f));
-
-        _mm256_storeu_ps(x + i, poly);
-        vsum = _mm256_add_ps(vsum, poly);
-    }
-    for (; i < n; i++) {
-        fp32 v = x[i] - maxv;
-        if (v < -8.0f) v = -8.0f;
-        if (v > 0.0f) v = 0.0f;
-        fp32 ev = 1.0f + v + v*v*0.5f + v*v*v*0.166666667f
-                  + v*v*v*v*0.041666667f + v*v*v*v*v*0.008333333f;
-        x[i] = ev;
-    }
-    fp32 sum = hsum8(vsum);
-    for (u32 j = (n & ~7u); j < n; j++) sum += x[j];
-    if (sum == 0.0f) sum = 1.0f;  // safety
+        // A row of zeros has max 0 and every exp is 1, so sum == n > 0. sum can
+        // only be 0 if n == 0, which is handled above; the guard stays as a
+        // belt-and-braces measure against a denormal-only row.
+        if (!(sum > 0.0f)) sum = 1.0f;
 
     // Normalize.
     __m256 vsumv = _mm256_set1_ps(sum);
