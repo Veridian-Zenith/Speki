@@ -1,71 +1,164 @@
 # SPDX-License-Identifier: OSL-3.0
-# build.just — Speki build orchestration.
+# justfile — task runner for speki.
 #
-# Run: `just build` to compile the runtime into a single static ELF.
-# Run: `just run`   to build and execute `./speki`.
+# This file deliberately holds NO compiler flags. The build is defined once, in
+# CMakeLists.txt. An earlier version of this file duplicated every -march and
+# -std flag, which meant three places to edit (here, build.sh, CMakeLists.txt)
+# and they had already drifted apart. If you need to change how speki compiles,
+# change CMakeLists.txt.
 #
-# We use clang/LLVM only. lld is the linker. No libc, no GNU anything.
-# Just is MIT (not GNU make).
+# The only place a flag may still be written out is tools/quantize/, which is a
+# separate Cargo workspace with its own build system.
 
-# We use fish as the shell (per project convention). Multi-line recipes
-# in fish need exactly 4-space indentation under the recipe name.
 set shell := ["fish", "-c"]
 
-cxx      := "clang"
-ld       := "ld.lld"
+# Out-of-source build tree. Everything generated lands under build/.
+cmake_dir := "build/cmake"
+build_dir := "build"
 
-# CFLAGS for the runtime (C/C++).
-# -march=alderlake targets AVX2, FMA, F16C, BMI1/2, GFNI, ADX, VAES, VPCLMULQDQ
-# -mtune=alderlake schedules for this microarch specifically
-# -nostdlib: no libc, no libgcc. We use raw_syscalls.h for the kernel ABI.
-# -fstack-protector-strong + -fcf-protection=full: matches your fish config.
-# -ftrivial-auto-var-init=zero: matches your fish config.
-# -ffreestanding: tells clang we don't have a hosted environment.
-# -O3 -Otime: optimize for speed. -flto=full: link-time optimization.
-# -std=c2x: C23. We use _Static_assert, _Noreturn, [[]] attributes, etc.
-# -std=c++26: only for .cpp files (set per-language below).
-cflags_common := "-march=alderlake -mtune=alderlake -mavx2 -mfma -mf16c -mbmi -mbmi2 -madx -mgfni -mvaes -mpclmul -O3 -fno-plt -fno-rtti -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fmerge-all-constants -ftrivial-auto-var-init=zero -fstack-clash-protection -fcf-protection=branch -ffunction-sections -fdata-sections -ffreestanding -Wall -Wextra -Wno-unused-parameter"
+# Show available recipes.
+default:
+    @just --list
 
-# Per-language flags.
-cflags_c   := cflags_common + " -std=c2x"
-cflags_cpp := cflags_common + " -std=c++26"
-
-ldflags := "-static -fuse-ld=lld -Wl,--strip-all -Wl,--build-id=none -Wl,-z,now -Wl,-z,relro -Wl,-z,noseparate-code -Wl,--gc-sections -Wl,--exclude-libs=ALL -nostdlib -nostartfiles"
-
-# Default target: just `build` does everything.
-default: build
-
-# ─── Build the runtime as a single static binary ────────────────────────────
-# Sources: crt/*.c plus runtime/runtime/*.c. All other headers are
-# header-only inline functions; only .c files become .o files.
+# ─── Configure ──────────────────────────────────────────────────────────────
 #
-# Build with: just build
-# Build with MKL: just build blas=mkl
+# Ninja for incremental builds; clang because speki is clang-only in practice
+# (it relies on -ffreestanding plus clang's exact codegen for the crt0 stack
+# alignment dance, which gcc does not reproduce).
+
+configure:
+    cmake -B {{cmake_dir}} -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+# ─── Build ──────────────────────────────────────────────────────────────────
 #
-# The actual build logic lives in ./build.sh (a fish script) because just's
-# recipe parser doesn't grok fish for-loops with multi-line bodies cleanly.
+# Requires `configure` to have run at least once.
 
-build *args:
-    ./build.sh
+build:
+    cmake --build {{cmake_dir}}
 
-# ─── Run it ─────────────────────────────────────────────────────────────────
+# Rebuild from scratch, including the configure step.
+rebuild: configure build
+
+# ─── Test ───────────────────────────────────────────────────────────────────
+#
+# Two suites, and they answer different questions:
+#
+#   test        — runs inside the freestanding binary (build/speki). Proves the
+#                 kernels work with NO libc at all, which is the property that
+#                 actually matters for this project.
+#   test-host   — links the same kernels against the host libm and measures
+#                 numerical error. The freestanding binary cannot check its own
+#                 accuracy; this is where that is verified.
+#
+# `test` is the gate. `test-host` is the one that catches a kernel that is
+# self-consistently wrong.
+
 run: build
-    ./speki
+    ./{{build_dir}}/speki
 
-# ─── Inspect the binary ─────────────────────────────────────────────────────
+test: build
+    ./{{build_dir}}/speki
+
+test-host:
+    cmake --build {{cmake_dir}} --target speki_kernels_host
+    ./{{build_dir}}/speki_kernels_host
+
+# Run both suites.
+check: test test-host
+
+# ─── Inspect ────────────────────────────────────────────────────────────────
+
+# Confirm the binary is genuinely static and freestanding — no interpreter,
+# no dynamic loader, no libc.
 inspect: build
-    llvm-readelf -h speki
-    llvm-readelf -S speki | head -30
-    @echo "---"
-    @echo "size: $(stat -c%s speki) bytes"
-    @echo "deps:"
-    -llvm-readelf -d speki 2>/dev/null || echo "  (no dynamic deps — fully static)"
+    @echo "== ELF header =="
+    llvm-readelf -h {{build_dir}}/speki
+    @echo ""
+    @echo "== size =="
+    @stat -c '%s bytes' {{build_dir}}/speki
+    @echo ""
+    @echo "== dynamic deps (expect none) =="
+    @llvm-readelf -d {{build_dir}}/speki 2>/dev/null || echo "  none - fully static"
+    @echo ""
+    @echo "== undefined symbols (expect none) =="
+    @llvm-nm -u {{build_dir}}/speki 2>/dev/null || echo "  none"
 
 # ─── Clean ──────────────────────────────────────────────────────────────────
-clean:
-    rm -rf build speki
+#
+# Removes build/ and the legacy build.sh tree. Nothing tracked by git is
+# touched; see .gitignore for what is considered generated.
 
-# ─── Quant tool (Rust) — separate workspace, OSL-3.0 ────────────────────────
-quant:
-    cd tools/quantize && cargo build --release
-    @echo "  built speki-quantize → tools/quantize/target/release/speki-quantize"
+clean:
+    rm -rf {{build_dir}}
+    @echo "removed {{build_dir}}/"
+
+# Also drop the legacy ./build.sh objects.
+distclean: clean
+    rm -f crt0.o crt_extras.o
+    @echo "removed legacy root objects"
+
+# ─── Legacy build.sh ────────────────────────────────────────────────────────
+#
+# Kept working as a fallback if CMake is unavailable, but it is no longer the
+# primary path and its flags are no longer kept in sync automatically. If you
+# change compiler flags, change CMakeLists.txt and mirror them here by hand.
+
+legacy:
+    ./build.sh
+
+# ─── Static analysis ───────────────────────────────────────────────────────
+#
+# clang-tidy is the cleanliness gate for contributed code. The check list and
+# the reasoning behind it live in .clang-tidy — read that before adding checks,
+# because most of the default set is wrong for a freestanding codebase (it
+# assumes a libc and a hosted toolchain).
+#
+# Needs compile_commands.json, which the dev preset generates.
+#
+#   just tidy           all sources
+#   just tidy-fix       apply the automatic fixes
+#
+# NOTE: these recipes run under fish (see `set shell` at the top), not bash.
+# Fish loops are `for f in ...; ...; end` — bash-style `do ... done` is a
+# syntax error here.
+
+tidy:
+    @echo "== clang-tidy =="
+    if not command -v clang-tidy >/dev/null
+        echo "  clang-tidy not found — install llvm's clang-tidy"
+        exit 1
+    end
+    set -l failed 0
+    for f in runtime/crt/*.c runtime/runtime/*.c
+        clang-tidy -p {{cmake_dir}} $f
+        or set failed 1
+    end
+    if test $failed -ne 0
+        echo "  clang-tidy reported problems"
+        exit 1
+    end
+    echo "  clean"
+
+tidy-fix:
+    for f in runtime/crt/*.c runtime/runtime/*.c
+        clang-tidy -p {{cmake_dir}} --fix $f
+    end
+
+# ─── Format / lint ──────────────────────────────────────────────────────────
+#
+# The project uses tabs-free 4-space C, 100-col comments, and no external
+# formatter config, so this is a syntax check rather than a reformat.
+#
+# Like `tidy`, this is fish syntax.
+
+lint:
+    @echo "== syntax check =="
+    for f in runtime/crt/*.c runtime/runtime/*.c
+        clang -fsyntax-only -std=c2x -march=alderlake -ffreestanding \
+            -Wall -Wextra -Wno-unused-parameter $f
+        or exit 1
+    end
+    echo "  all sources parse clean"

@@ -1,0 +1,121 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development \u2014 RelWithDebInfo, warnings, host tests on",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "SPEKI_ARCH": "alderlake",
+        "SPEKI_OPT": "O2",
+        "SPEKI_WERROR": "ON",
+        "SPEKI_HOST_TESTS": "ON",
+        "SPEKI_STRIP": "OFF"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release \u2014 O3, stripped, warnings not fatal",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SPEKI_ARCH": "alderlake",
+        "SPEKI_OPT": "O3",
+        "SPEKI_WERROR": "OFF",
+        "SPEKI_HOST_TESTS": "OFF",
+        "SPEKI_STRIP": "ON"
+      }
+    },
+    {
+      "name": "native",
+      "displayName": "Native \u2014 tune for THIS machine's CPU, keep symbols",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "SPEKI_ARCH": "native",
+        "SPEKI_OPT": "O3",
+        "SPEKI_WERROR": "ON",
+        "SPEKI_HOST_TESTS": "ON",
+        "SPEKI_STRIP": "OFF"
+      }
+    },
+    {
+      "name": "portable",
+      "displayName": "Portable \u2014 x86-64-v2 baseline, runs on older hardware",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SPEKI_ARCH": "x86-64-v2",
+        "SPEKI_OPT": "O3",
+        "SPEKI_HOST_TESTS": "OFF",
+        "SPEKI_STRIP": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer \u2014 host tests only, for debugging",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SPEKI_HOST_TESTS": "ON",
+        "SPEKI_STRIP": "OFF",
+        "SPEKI_EXTRA_CFLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+        "SPEKI_EXTRA_LDFLAGS": "-fsanitize=address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "native",
+      "configurePreset": "native"
+    },
+    {
+      "name": "portable",
+      "configurePreset": "portable"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "inherits": "base"
+    },
+    {
+      "name": "native",
+      "configurePreset": "native",
+      "inherits": "base"
+    }
+  ]
+}
