@@ -12,6 +12,7 @@
 
 include_guard(GLOBAL)
 
+
 # ─── Read an environment variable into a cache variable ─────────────────────
 #
 # speki_default(<cachevar> <envname> <default> [docstring])
@@ -45,30 +46,91 @@ function(speki_default var env default)
   endif()
 endfunction()
 
+# speki_detect_cstd
+#
+# Probes for the newest C dialect the compiler actually accepts, newest first,
+# and sets SPEKI_CSTD. An explicit SPEKI_CSTD (or SPEKI_CSTD env var) wins and
+# skips the probe entirely.
+#
+# Why probe instead of defaulting to c2y: c2y (C26) is recent, and older clang
+# — including whatever ubuntu-latest ships — rejects it outright with
+# "error: invalid value 'c2y' in '-std=c2y'". A build system that hardcodes the
+# newest standard works on exactly one machine.
+#
+# The candidates are ISO dialects only (c2y, c2x, c17), never gnu*: speki is
+# freestanding and must not silently depend on GNU extensions.
+
+function(speki_detect_cstd)
+  # An explicit SPEKI_CSTD (cache var or env) pins the dialect; skip the probe.
+  # Test for EMPTY, not for undefinedness: speki_default() always defines the
+  # variable (to "" when nothing was requested), so `if(NOT DEFINED ...)` would
+  # never fire.
+  if(NOT "${SPEKI_CSTD}" STREQUAL "")
+    message(STATUS "speki: C dialect pinned to ${SPEKI_CSTD}")
+    return()
+  endif()
+
+  # Ask the compiler directly which dialects it accepts. Newest first:
+  #   c2y = C26 (__STDC_VERSION__ 202400)
+  #   c2x = C23 (202311)
+  #   c17 = last dialect every current compiler supports
+  #
+  # ISO dialects only, never gnu*: speki is freestanding and must not pick up a
+  # GNU extension by accident.
+  set(candidates c2y c2x c17)
+
+  # Minimal valid program; the probe only cares whether -std=<dialect> parses.
+  set(probe "${CMAKE_CURRENT_BINARY_DIR}/.speki_cstd_probe.c")
+  file(WRITE "${probe}" "int main(void) { return 0; }\n")
+
+  foreach(cand IN LISTS candidates)
+    # -Werror plus a known-good program, so the only thing that can fail is the
+    # dialect flag itself being unknown to this compiler.
+    execute_process(
+      COMMAND ${CMAKE_C_COMPILER} -std=${cand} -Werror -fsyntax-only
+              "${probe}"
+      RESULT_VARIABLE rc
+      OUTPUT_VARIABLE out
+      ERROR_VARIABLE  err)
+
+    if(rc EQUAL 0)
+      set(SPEKI_CSTD "${cand}" CACHE STRING "Detected C dialect" FORCE)
+      message(STATUS "speki: using C dialect ${cand}")
+      return()
+    endif()
+  endforeach()
+
+  message(FATAL_ERROR
+    "speki: no usable C dialect. Tried: ${candidates}. "
+    "Set SPEKI_CSTD explicitly, e.g. -DSPEKI_CSTD=c17.")
+endfunction()
+
 # ─── Kernels ────────────────────────────────────────────────────────────────
 
 # C standard for the runtime.
 #
-# THE FLAG IS c2y, NOT c26.
-# ─────────────────────────────
+# THE FLAG IS c2y, NOT c26 — AND NOT EVERY COMPILER HAS IT.
+# ───────────────────────────────────────────────────────
 # C26 (__STDC_VERSION__ == 202400) has no `-std=c26` spelling. clang names
-# dialects after the committee draft: `-std=c2y` selects C26, and `-std=c2x`
-# selects C23 (202311). `clang -std=c26` is simply rejected as invalid.
-# Verified on clang 23.1.1:
+# dialects after the committee draft: `-std=c2y` selects C26, `-std=c2x`
+# selects C23 (202311), and `-std=c26` is rejected outright.
 #
-#   -std=c2y  ->  __STDC_VERSION__ 202400   (C26)
-#   -std=c2x  ->  __STDC_VERSION__ 202311   (C23)
-#   -std=c26  ->  error: invalid value
+# c2y only exists in newer clang. Ubuntu's default clang (as used by
+# ubuntu-latest in CI) tops out at c23 and errors with
+#   error: invalid value 'c2y' in '-std=c2y'
+# so hardcoding the newest dialect breaks the build on any older toolchain.
+# speki_detect_cstd() below probes what the compiler actually accepts and
+# takes the newest one that works.
 #
-# So we default to the newest standard this compiler can actually select:
-# c2y / C26. If a toolchain lacks it, drop to c2x with SPEKI_CSTD=c2x.
+# SPEKI_CSTD overrides the probe entirely, if you want to pin it:
+#   SPEKI_CSTD=c2x cmake -B build/cmake --preset dev
 #
-# We ask for the ISO dialect (c2y) rather than the GNU one (gnu2y) so a stray
+# We request the ISO dialect rather than the GNU one (gnu2y/gnu2x) so a stray
 # GNU extension cannot creep in unnoticed: under -std=c2y clang warns about
 # anything non-standard. That matters for a project whose whole premise is
 # freestanding portability.
-speki_default(SPEKI_CSTD        SPEKI_CSTD        "c2y"
-  "C dialect: c2y (=C26, __STDC_VERSION__ 202400), c2x (=C23). Not 'c26'.")
+speki_default(SPEKI_CSTD_REQUESTED SPEKI_CSTD ""
+  "Pin the C dialect (e.g. c2y, c2x, c17). Empty = probe for the newest the compiler supports.")
 
 # C++ standard, for any future C++ target (tools/quantize is Rust today, and
 # speki itself is pure C, so nothing links this yet — it is here so that
@@ -113,6 +175,7 @@ speki_default(SPEKI_EXTRA_LDFLAGS SPEKI_EXTRA_LDFLAGS ""
 # own options are assembled.
 
 function(speki_apply_toolchain target)
+
   # Set the dialect explicitly rather than via target_compile_features, which
   # would silently pick gnu23 and hide whether the ISO or GNU dialect is in
   # effect. SPEKI_CSTD defaults to c2x (=C23).

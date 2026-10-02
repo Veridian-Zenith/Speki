@@ -49,6 +49,13 @@ cmake_minimum_required(VERSION 3.20)
 project(speki C)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SpekiFlags.cmake")
+
+# Resolve the C dialect before anything reads SPEKI_CSTD or emits a -std flag.
+# This has to run at directory scope: check_c_source_compiles() caches its
+# result, and calling it from inside a function() would scope the SPEKI_CSTD
+# assignment to that function.
+speki_detect_cstd()
+
 speki_print_config()
 
 # ─── Sources ────────────────────────────────────────────────────────────────
