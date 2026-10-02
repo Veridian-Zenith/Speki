@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: OSL-3.0
+# Dependabot for speki.
+#
+# Two ecosystems:
+#
+#   github-actions  keeps actions/checkout, upload-artifact, etc. current
+#   gitsubmodule     nothing today, declared so adding one later needs no
+#                    config change
+#
+# speki has no language package manager in the usual sense — no npm, no cargo,
+# no pip. The C toolchain is the "dependency", and it comes from the runner
+# image, which is why ci.yml pins no clang version: the build probes for the
+# newest dialect the runner's compiler supports instead.
+
+version: 2
+
+updates:
+  # ─── GitHub Actions ───────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+    groups:
+      # One PR for all action bumps rather than one per action.
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # ─── Submodules ───────────────────────────────────────────────────────────
+  # None present. Kept so a future submodule (e.g. a reference model or test
+  # corpus) is picked up automatically.
+  - package-ecosystem: "gitsubmodule"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "submodule"

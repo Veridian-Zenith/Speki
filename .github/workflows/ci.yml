@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: OSL-3.0
 # CI for speki.
 #
-# Deliberately simple and dependency-light: no matrix sprawl, no container
-# builds. speki needs clang + lld + cmake + ninja, and that is all.
+# speki is an AI model runtime: a freestanding inference engine, currently
+# built up from the bottom (kernels -> layers -> forward pass -> a small
+# model). The CI gates follow that ordering — each one protects a layer that
+# has to stay correct before the layer above it can be trusted.
 #
-# The gates, in order of what they catch:
+# Gates, in order of what each catches:
 #
 #   build        does it compile at all
-#   freestanding is the binary actually static, with no undefined symbols
-#   test         do the in-binary kernel tests pass (exit status is enforced)
-#   host-test    do the kernels match an independent reference numerically
+#   freestanding is the binary genuinely static, with no undefined symbols
+#   test         do the in-binary kernel tests pass (exit status IS the gate)
+#   host-test    are the kernels numerically right against a reference
 #   tidy         is contributed code clean
+#   release-size does the shipping configuration stay small
 #
-# The `host-test` and `tidy` jobs are what stop a repeat of the softmax
-# hsum8/hmax8 bug, which compiled cleanly, passed its own tests, and was
-# silently wrong.
+# The freestanding and host-test jobs answer different questions and neither
+# subsumes the other. The freestanding binary has no libm, so it can only
+# check structural properties; the host suite checks numerical accuracy
+# against an independent __float128 reference. A kernel has to satisfy both.
+#
+# NOTE ON THE TOOLCHAIN: no clang version is pinned.
+# cmake/SpekiFlags.cmake probes for the newest C dialect the compiler actually
+# supports (c2y, else c2x, else c17), so this works on old and new runners
+# alike. Pinning a dialect the runner's clang does not know is exactly what
+# broke CI before.
 
 name: CI
 
@@ -26,6 +36,12 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  # Cancel superseded runs on the same ref, so a busy branch does not queue
+  # five identical builds.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   BUILD_DIR: build/cmake
@@ -50,7 +66,7 @@ jobs:
 
       - name: Run kernel tests (freestanding)
         # No libc in this binary, so passing here proves the kernels work
-        # without one. Exit status is the gate.
+        # without one. The exit status is the gate: crt0.c exits 1 on failure.
         run: ./build/speki
 
       - name: Verify the binary is genuinely freestanding
@@ -75,9 +91,9 @@ jobs:
             echo "ok: no shared library dependencies"
           fi
 
-          # Must have no undefined symbols: nothing was left to resolve at
-          # runtime. (strip-all removes .symtab, so check the dynamic symbol
-          # table, which survives stripping.)
+          # No undefined symbols: nothing left to resolve at runtime.
+          # --strip-all removes .symtab, so inspect the dynamic symbol table,
+          # which survives stripping.
           if readelf --dyn-syms build/speki 2>/dev/null | grep -q ' UND '; then
             echo "FAIL: undefined symbols in build/speki:"
             readelf --dyn-syms build/speki | grep ' UND '
@@ -86,8 +102,8 @@ jobs:
             echo "ok: no undefined symbols"
           fi
 
-          # Sanity: the binary should be small. If this grows past a few
-          # hundred KB something has linked in a runtime by accident.
+          # A model runtime has no business shipping a libc-sized blob. Growth
+          # past a few hundred KB means a runtime got linked in by accident.
           size=$(stat -c%s build/speki)
           echo "size: $size bytes"
           if [ "$size" -gt 1048576 ]; then
@@ -96,6 +112,14 @@ jobs:
           fi
 
           exit $fail
+
+      - name: Upload binary
+        # Freestanding: no interpreter needed, so it runs anywhere x86-64 does.
+        uses: actions/upload-artifact@v4
+        with:
+          name: speki-freestanding
+          path: build/speki
+          if-no-files-found: error
 
   host-test:
     name: Kernel accuracy vs independent reference
@@ -115,22 +139,17 @@ jobs:
         run: cmake --build ${{ env.BUILD_DIR }} --target speki_kernels_host
 
       - name: Check kernels against the fp128 reference
-        # This suite links no C library. Its reference is an independent
-        # Taylor series in __float128, so it cannot agree with mathf.h by
-        # sharing a mistake.
+        # A real gate, not informational. This suite links no C library and its
+        # reference is an independent Taylor series in __float128 with its own
+        # ln(2), so it cannot agree with mathf.h by sharing a mistake.
         #
-        # NOTE: silu_f32 and softmax_f32 are known-broken and expected to fail
-        # here (see README "Known-broken or missing"). Remove this xfail once
-        # they are fixed — and check that the count only ever goes DOWN.
-        run: |
-          set +e
-          ./build/speki_kernels_host
-          rc=$?
-          echo "host suite exit: $rc"
-          # Expected state: the exp family passes, silu/softmax fail.
-          # This job is informational until those kernels are fixed; flip it
-          # to a hard gate in the same commit that fixes them.
-          exit 0
+        # Accuracy here is what a transformer silently loses: every downstream
+        # computation is scale-invariant, so a kernel off by 1e-6 relative does
+        # not crash, it just quietly degrades the model.
+        run: ./build/speki_kernels_host
+
+      - name: Run via ctest
+        run: ctest --preset dev
 
   tidy:
     name: clang-tidy
@@ -147,7 +166,7 @@ jobs:
         run: cmake -B ${{ env.BUILD_DIR }} --preset dev
 
       - name: Run clang-tidy
-        # The check list and why it is narrow live in .clang-tidy.
+        # The check list and the reasoning behind it live in .clang-tidy.
         run: |
           set -euo pipefail
           fail=0
@@ -155,3 +174,37 @@ jobs:
             clang-tidy -p ${{ env.BUILD_DIR }} "$f" || fail=1
           done
           exit $fail
+
+  release-size:
+    name: Release build stays small
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld cmake ninja-build
+
+      - name: Configure (release)
+        run: cmake -B build/release --preset release
+
+      - name: Build
+        run: cmake --build build/release
+
+      - name: Check size, stripping, and behaviour
+        # The release preset is what ships, so its size is the number that
+        # matters. Guards against a debug preset or a stray -g creeping in.
+        run: |
+          set -euo pipefail
+          size=$(stat -c%s build/speki)
+          echo "release size: $size bytes"
+          if [ "$size" -gt 262144 ]; then
+            echo "FAIL: release binary is $size bytes, expected well under 256 KB"
+            exit 1
+          fi
+          if file build/speki | grep -qv stripped; then
+            echo "FAIL: release binary is not stripped"
+            exit 1
+          fi
+          ./build/speki
