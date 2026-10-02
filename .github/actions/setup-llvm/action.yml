@@ -66,27 +66,46 @@ runs:
 
         # Fingerprint of the LLVM archive key. If this ever fails to match, the
         # key was rotated and a human needs to look -- that is the point of
-        # pinning it.
-        EXPECTED="6084F3CF814B57C1CF12EFD515CF4DAF4F7421"
+        # pinning it. Verified with:
+        #   curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+        #     | gpg --show-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}'
+        EXPECTED="6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
         ACTUAL=$(gpg --show-keys --with-colons /tmp/llvm.key \
                  | awk -F: '/^fpr:/{print $10; exit}')
         if [ "$ACTUAL" != "$EXPECTED" ]; then
           echo "::error::apt.llvm.org key fingerprint mismatch."
           echo "  expected $EXPECTED"
-          echo "  actual   $ACTUAL"
+          echo "  actual   ${ACTUAL:-<none: gpg produced no fingerprint>}"
           echo "The LLVM archive key may have been rotated. Verify before trusting."
           exit 1
         fi
+        echo "verified apt.llvm.org key fingerprint $ACTUAL"
 
         sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg /tmp/llvm.key
 
-        # codename is read from the runner rather than hardcoded, so this keeps
-        # working if the base image moves.
-        CODENAME=$(lsb_release -cs)
+        # The codename for the apt.llvm.org path. Read from the runner rather than
+        # hardcoded so this survives a base-image change -- but fall back to
+        # reading /etc/os-release directly, because `lsb_release -cs` returns
+        # "n/a" on some images and would otherwise produce a malformed repo
+        # line that fails much later with a confusing apt error.
+        CODENAME=$(lsb_release -cs 2>/dev/null || true)
+        if [ -z "$CODENAME" ] || [ "$CODENAME" = "n/a" ]; then
+          CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+        fi
+        if [ -z "$CODENAME" ]; then
+          echo "::error::cannot determine the distribution codename."
+          echo "apt.llvm.org needs it to build the repository line."
+          echo "Set it explicitly, or check /etc/os-release has VERSION_CODENAME."
+          exit 1
+        fi
+        echo "using apt.llvm.org for ${CODENAME}"
+
         echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${VER} main" \
           | sudo tee /etc/apt/sources.list.d/llvm-${VER}.list > /dev/null
 
         sudo apt-get update
+        # clang-tidy is installed by the same action; cmake/ninja come from the
+        # runner image, which always has them.
         sudo apt-get install -y --no-install-recommends \
           "clang-${VER}" "lld-${VER}" "clang-tidy-${VER}"
         echo "installed LLVM ${VER} for ${CODENAME}"
