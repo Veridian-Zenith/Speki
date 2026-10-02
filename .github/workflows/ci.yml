@@ -115,7 +115,7 @@ jobs:
 
       - name: Upload binary
         # Freestanding: no interpreter needed, so it runs anywhere x86-64 does.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: speki-freestanding
           path: build/speki
