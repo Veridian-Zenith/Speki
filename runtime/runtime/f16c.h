@@ -21,18 +21,33 @@
 
 // f16_to_f32_bits(h) — bit-cast FP16 to FP32 by promoting through F16C.
 //
-// We use the scalar intrinsic _cvtsh_ss which returns the FP32 value
-// directly. The FP16 is held in the low 16 bits of a __fp16/int.
+// _cvtsh_ss takes the 16 bits AS AN unsigned short and returns the fp32
+// value. Do not insert a (__fp16) cast in between: that is a VALUE conversion
+// from integer to half, not a bit reinterpretation, so 0x4248 (whose bits
+// encode 3.140625) would first become the half nearest to the integer 16968,
+// i.e. inf, and the result came back as 3.125 instead. Every fp16 -> fp32
+// promotion in the project was affected by this.
 static inline fp32 f16_to_f32(fp16 h) {
-    return (fp32)_cvtsh_ss((__fp16)h);
+    return _cvtsh_ss((unsigned short)h);
 }
 
 // f32_to_f16(f) — demote FP32 to FP16 via F16C.
 //
-// _cvtss_sh takes an FP32 and returns a __fp16 (which on x86 is just a
-// 16-bit half). We pack it into our u16 storage.
+// _cvtss_sh's second argument is an IMMEDIATE, not a runtime value: the low
+// bits select the rounding mode and the upper bits suppress exceptions. So
+// this cannot be written as a plain helper taking a mode parameter -- the mode
+// has to be a compile-time constant.
+//
+// The mode here must be _MM_FROUND_TO_NEAREST_INT (0x00), which selects
+// round-to-nearest-even. Passing 0 as a *bare literal* looks identical but is
+// not the same thing to reason about, and more importantly the default for
+// this intrinsic when rounding bits read as "use MXCSR" is to TRUNCATE. That
+// silently produced 0x4248 (= 3.125) for pi, where correctly-rounded is
+// 0x4249 (= 3.140625) -- an error of 0.0166, not a rounding artefact.
+// Values that are exactly representable in fp16 were unaffected, which is why
+// the bug survived: every other f16c test in the tree used such values.
 static inline fp16 f32_to_f16(fp32 f) {
-    return (fp16)(u16)_cvtss_sh(f, 0);
+    return (fp16)(u16)_cvtss_sh(f, _MM_FROUND_TO_NEAREST_INT | 0x00);
 }
 
 // ─── SIMD conversions (8x or 16x in one instruction) ──────────────────────
