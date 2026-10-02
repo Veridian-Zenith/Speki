@@ -14,7 +14,9 @@ compiler-rt. That means:
 - No `atexit`, no destructors, no `.init_array` processing.
 - No buffered stdio — `raw_io.h` writes straight to file descriptors.
 
-The payoff is a ~40 KB static binary with no dynamic dependencies at all.
+The payoff is a ~110 KB static binary with no dynamic dependencies at all,
+with room to grow: this currently holds the crt, the arena, the tensor layer
+and seven kernels, and the model runtime itself still has to fit in there too.
 The CI job `Verify the binary is genuinely freestanding` checks this on
 every push: no interpreter, no loader, no shared library dependencies,
 no undefined symbols.
@@ -43,8 +45,22 @@ The `sub $8` restores the post-`call` state clang expects, and `jmp` rather
 than `call` avoids pushing a return address we will never use.
 
 This is subtle, platform-specific, and exactly the kind of thing that breaks
-silently on a toolchain upgrade. If speki ever starts SIGILLing at startup
-with no other explanation, look here first.
+silently on a toolchain upgrade.
+
+**This was investigated as a suspect and cleared.** When the binary began
+dying with SIGILL partway through the kernel tests, stack misalignment was the
+leading theory — the binary contains ~67 `vmovaps`/`vmovapd` instructions,
+several stack-relative (`vmovaps %xmm0, -0x38(%rsp)`), each of which raises
+`#GP` when `rsp` is misaligned.
+
+A standalone reproduction reported the `rsp` alignment `speki_main` actually
+observes, for both this sequence and an `and $-16` + `push $0` realigning
+variant. Both produce `rsp mod 16 == 0`. The alignment was never the problem,
+and the realigning variant was reverted rather than left in on a false premise.
+
+The actual cause was a `-march` mismatch: CI runs on AMD EPYC (Zen 3) while
+development is on Intel Alder Lake. Recorded here so nobody re-derives the
+alignment theory. See [toolchain.md](toolchain.md).
 
 ## Why `-fno-stack-protector`
 
@@ -134,42 +150,67 @@ no compiler flags — those live in `cmake/SpekiFlags.cmake`, once.
 
 ## Current ISA assumptions
 
-The baseline is `-march=alderlake`: AVX2, FMA, F16C, BMI1/2, ADX, GFNI,
-VAES, VPCLMULQDQ.
+**AVX2 is required, and there is no SSE fallback.** Every kernel is hand-written
+with AVX2/FMA/F16C intrinsics, so an older `-march` does not make the binary
+slower — it fails to compile:
 
-**Not** AVX-512, VNNI, or AMX. Consumer Alder Lake has no silicon for any of
-them. Compiling with `-mavx512f` would succeed and then SIGILL at startup.
+```
+error: always_inline function '_mm256_fmadd_ps' requires target feature 'fma'
+error: AVX vector return of type '__m256' without 'avx' enabled changes the ABI
+```
 
-`--preset portable` builds for `x86-64-v2` so the binary runs on older
-hardware, at the cost of losing AVX2/FMA/F16C and with it the F16C
-conversion path in the matmul kernels.
+So `haswell` (AVX2 + FMA + F16C, nothing newer) is the floor. That is what CI
+and the `release` preset target. It still buys real portability: **no**
+AVX-512, VNNI, or AMX, and no GFNI/VAES/VPCLMULQDQ or Alder Lake tuning.
 
-## The C standard: C23, not C26
+Two consequences worth stating plainly:
+
+- Local development defaults to `-march=native`, the fastest thing this machine
+  can run.
+- Anything built for hardware you do not control must set `SPEKI_ARCH`
+  explicitly. `native` on a build machine means "whatever CPU the runner
+  happens to be". CI ran on an AMD EPYC 7763 (Zen 3) while development was on
+  Intel Alder Lake, and an `alderlake` binary died there with SIGILL
+  mid-test.
+
+Getting below `haswell` means writing SSE paths for every kernel. That is real
+work on the roadmap, not a flag change.
+
+Note that `-mavx2 -mfma -mf16c` are passed explicitly and are **load-bearing**:
+they state a real requirement, and an explicit `-m<feature>` also silently
+re-enables that feature regardless of `-march`. See
+[toolchain.md](toolchain.md#the-m-flags-are-load-bearing).
+
+## The C standard: C26
 
 speki is pure C, so the C dialect matters and the C++ one does not.
 
-`-std=c++26` works on this toolchain (`__cplusplus == 202400`), but there is
-no C++ in this project. For C, **clang 23 does not accept `-std=c26`** — the
-dialect flag is still `-std=c2x` (alias `c23`), which yields:
+C26 has no `-std=c26` spelling. clang names dialects after the committee draft:
+`-std=c2y` selects C26 and `-std=c2x` selects C23.
 
 ```
-__STDC_VERSION__ == 202311      // C23
+-std=c2y  ->  __STDC_VERSION__ 202400   (C26)
+-std=c2x  ->  __STDC_VERSION__ 202311   (C23)
+-std=c26  ->  error: invalid value
 ```
 
-C26 proper would be `__STDC_VERSION__ == 202400` and is not selectable with
-clang 23.1.1. So `SPEKI_CSTD` defaults to `c2x` and the honest description of
-this codebase is **C23**.
+The build **requires** `c2y` and fails with an actionable message if the
+compiler cannot provide it, rather than silently downgrading. That was a
+deliberate reversal: the earlier version probed `c2y → c2x → c17` and took the
+first that compiled, which meant a build could pass locally and quietly produce
+something different on an older compiler. Old compilers also carry known CVEs,
+so a pinned old toolchain is a supply-chain liability, not just an
+inconvenience. `SPEKI_CSTD` can still pin a dialect explicitly, but a
+downgrade has to be asked for rather than fallen into.
 
-Note the difference from `Mimir` and `Verdandi`, which are C++26 projects and
-do use `-std=c++26`.
+We request the ISO dialect rather than the GNU one so a GNU extension cannot
+slip in unremarked. For a project whose premise is freestanding portability,
+that warning is worth having.
 
-We request the ISO dialect (`c2x`) rather than the GNU one (`gnu2x`) on
-purpose: with `-std=c2x`, clang warns about any GNU extension, so a stray
-non-standard construct cannot slip in. For a project whose premise is
-freestanding portability, that warning is worth having.
-
-`SPEKI_CSTD` is a cache variable, so `SPEKI_CSTD=c17` downgrades it if a
-toolchain needs an older baseline.
+C26 also deprecates bare leading-zero octal, and the replacement `0o` prefix
+only became a supported spelling in clang 21 — so the open() flags in
+`raw_io.h` are hex, which is the one spelling with no dialect or
+compiler-version dependency.
 
 ## Hosted vs freestanding: the `__speki_freestanding__` macro
 

@@ -15,6 +15,18 @@ The ordering is the point. Everything below the forward pass has to be exactly
 right, because a kernel that is 1e-6 off does not crash — it quietly degrades
 every weight it touches, and there is no debugger for that.
 
+## Documentation
+
+| | |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to contribute; why a self-consistent test is not a passing test |
+| [CHANGELOG.md](CHANGELOG.md) | what changed, including the bugs worth remembering |
+| [SECURITY.md](SECURITY.md) | reporting; the failure modes that matter in a runtime with no libc |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | conduct, mods and admins included |
+| [docs/architecture.md](docs/architecture.md) | freestanding constraints, `_start`, why exp is fp64 |
+| [docs/toolchain.md](docs/toolchain.md) | requirements, presets, knobs, the arch floor |
+| [CMakePresets.md](CMakePresets.md) | preset-by-preset detail |
+
 ## Design constraints
 
 Three rules shape everything here:
@@ -170,8 +182,8 @@ cases; every value can also come from the environment.
 
 ```sh
 cmake -B build/cmake --preset dev       # native CPU, -O2, -Werror, symbols
-cmake -B build/cmake --preset release   # x86-64-v2, -O3, stripped  (ships)
-cmake -B build/cmake --preset portable  # x86-64-v2 baseline
+cmake -B build/cmake --preset release   # haswell, -O3, stripped  (ships)
+cmake -B build/cmake --preset portable  # haswell baseline, the AVX2 floor
 cmake -B build/cmake --preset asan      # sanitizers, host tests only
 ```
 
@@ -188,8 +200,9 @@ SPEKI_ARCH=native SPEKI_OPT=O1 cmake -B build/cmake --preset dev
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SPEKI_CSTD` | `c2x` | C dialect. clang 23 has no `-std=c26`; see below |
+| `SPEKI_CSTD` | `c2y` | C dialect (C26). Detected; fails loudly if unavailable |
 | `SPEKI_ARCH` | `native` | `-march` / `-mtune`. CI and `release` use `haswell` |
+| `SPEKI_LD` | `lld` | Linker driver |
 | `SPEKI_OPT` | `O3` | Optimization level |
 | `SPEKI_WERROR` | `OFF` | Warnings as errors |
 | `SPEKI_STRIP` | `ON` | Strip the binary |
@@ -204,18 +217,22 @@ guess which flags a build dir picked up.
 See `CMakePresets.md` for preset details and `cmake/SpekiFlags.cmake` for the
 flag policy — the comments there explain *why* each flag is present.
 
-> **C23, not C26.** speki is pure C. `-std=c++26` works on clang 23
-> (`__cplusplus == 202400`) but does not apply here; `-std=c26` is *rejected*
-> by this compiler. The C dialect flag is `-std=c2x`, giving
-> `__STDC_VERSION__ == 202311`, i.e. C23. We ask for the ISO dialect rather
-> than `gnu2x` so a GNU extension cannot creep in unremarked.
+> **C26, via `-std=c2y`.** C26 has no `-std=c26` spelling; clang names
+> dialects after the committee draft. `-std=c2y` yields
+> `__STDC_VERSION__ == 202400`. The build requires it and fails with an
+> actionable message rather than silently downgrading — a silent fallback
+> means a build can pass locally and quietly produce something different
+> elsewhere.
 
-> **The arch trap.** Consumer Alder Lake has no AVX-512, no VNNI and no AMX
-> silicon. `-march=native` here resolves to exactly what this CPU supports, so
-> it is safe — but naming an arch that *does* have AVX-512 (`skylake-avx512`,
-> `sapphirerapids`, …) and running the result on hardware without it will
-> SIGILL, and the build cannot detect that. CI learned this the hard way: it
-> runs on AMD EPYC (Zen 3), not Alder Lake.
+> **The arch trap.** `native` is right for local work and wrong for anything
+> built for hardware you don't control — it means "whatever CPU this machine
+> happens to be". CI learned that the hard way: it runs on AMD EPYC (Zen 3),
+> not Alder Lake, and an `alderlake` binary died there with SIGILL mid-test.
+> CI and `release` therefore pin `haswell` explicitly.
+>
+> `haswell` is the floor, not "basic x86-64": the kernels are hand-written
+> AVX2/FMA/F16C with no SSE path, so an older `-march` fails to compile rather
+> than running slower. See [docs/toolchain.md](docs/toolchain.md).
 
 ## Testing
 
