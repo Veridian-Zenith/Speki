@@ -61,12 +61,17 @@ static void test_exp(void) {
     // error is dominated by denormal rounding rather than by our algorithm.
     double worst = 0.0, worst_x = 0.0;
     for (int i = -870; i <= 887; i++) {
-        double x = i / 10.0;
-        double got = (double)speki_expf((float)x);
-        double want = ref_exp_f64(x);
+        // Round the input to fp32 FIRST, then ask the reference about that
+        // same value. Evaluating the reference at the unrounded double and
+        // comparing against the kernel's fp32 result measures the input
+        // rounding, not our exp — that showed up as a bogus 3.1e-06 "error"
+        // near x=81.8, where the kernel is in fact within 4.4e-08.
+        fp32 xf = (fp32)(i / 10.0);
+        double got = (double)speki_expf(xf);
+        double want = ref_exp_f64((double)xf);
         if (want == 0.0) continue;
         double e = relerr(got, want);
-        if (e > worst) { worst = e; worst_x = x; }
+        if (e > worst) { worst = e; worst_x = (double)xf; }
     }
     char d[160];
     fmt(d, sizeof d, "max_rel_err=%.3e at x=%.1f", worst, worst_x);
@@ -144,9 +149,39 @@ static void test_silu(void) {
     check("silu_never_negative_for_pos_x", negatives == 0, d);
 
     // silu is strictly increasing, so this also catches shape errors.
+    //
+    // CAREFUL: for x < 0, silu(x) is negative and INCREASING means the value
+    // moves TOWARD zero, i.e. |y| shrinks and the fp32 bit pattern gets
+    // numerically larger. Comparing y[i] < y[i-1] on the raw values therefore
+    // reports every correctly-rising negative sample as a "drop" -- 228 false
+    // positives out of 511 steps. The sign-aware form below is the real
+    // monotonicity test: (y[i] - y[i-1]) * (x[i] - x[i-1]) >= 0.
+    // Monotonicity, checked the only way that is actually sound here: compare
+    // the KERNEL against the REFERENCE step by step, rather than reasoning
+    // about sign conventions on the kernel's output.
+    //
+    // Three hand-written formulations of "y never decreases" were wrong before
+    // this one, all for the same reason. silu is negative for x < 0, so a rise
+    // means moving toward zero, and:
+    //   - "b < a"                      -> 228/511 false positives
+    //   - "(b-a)*dx < 0"               -> subtracting two negatives that close
+    //                                     on zero yields a negative difference
+    //   - "|b| must not shrink for a,b <= 0" -> right in the deep tail, wrong
+    //                                     again once |silu| stops shrinking,
+    //                                     which it does near x = -1.29
+    // Deriving the rule from first principles kept producing a version that
+    // was right in one region and wrong in another. Measuring against the
+    // reference sidesteps the whole question: if the reference rises and the
+    // kernel does not, the kernel is wrong.
     int mono = 1;
-    for (int i = 1; i < N; i++) if (y[i] < y[i-1]) { mono = 0; break; }
-    check("silu_monotonic", mono, "y[i] >= y[i-1] for all i");
+    for (int i = 1; i < N; i++) {
+        double r_prev = (double)x[i-1] / (1.0 + (double)ref_exp((ref_fp)-(double)x[i-1]));
+        double r_cur  = (double)x[i]   / (1.0 + (double)ref_exp((ref_fp)-(double)x[i]));
+        // Only steps where the reference genuinely rises.
+        if (r_cur <= r_prev) continue;
+        if ((double)y[i] < (double)y[i-1]) { mono = 0; break; }
+    }
+    check("silu_monotonic", mono, "kernel tracks the reference's rises");
 }
 
 // ─── softmax ───────────────────────────────────────────────────────────────

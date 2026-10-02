@@ -73,14 +73,20 @@ static ref_fp ref_ln2(void) {
 
 // ref_exp2i — 2^k by bit pattern, for the reference's own range reduction.
 // Independent of speki_exp2i on purpose: same idea, separately written.
+//
+// __float128 layout (IEEE 128-bit quadruple): 1 sign, 15 exponent bits,
+// 112 mantissa bits. The exponent field sits at bits 112..126, biased by
+// 16383. It is NOT fp64's layout — an fp64 shift of 52 would be badly wrong
+// here, and silently so: it makes 2^k come out as 0 or denormal for positive k
+// without erroring.
+//
+// The normal range is 2^-16382 .. 2^16383. Outside that, scale in two steps.
 static ref_fp ref_exp2i(int k) {
-    if (k > 1023 || k < -1022) {
-        // Out of normal range; scale in two steps so we do not overflow.
-        if (k > 1023)  return ref_exp2i(1023) * ref_exp2i(k - 1023);
-        if (k < -1022) return ref_exp2i(-1022) * ref_exp2i(k + 1022);
-    }
-    union { unsigned long long u; ref_fp f; } v;
-    v.u = ((unsigned long long)(unsigned)(k + 1023)) << 48;
+    if (k > 16383)  return ref_exp2i(16383)  * ref_exp2i(k - 16383);
+    if (k < -16382) return ref_exp2i(-16382) * ref_exp2i(k + 16382);
+
+    union { unsigned __int128 u; ref_fp f; } v;
+    v.u = ((unsigned __int128)(unsigned short)(k + 16383)) << 112;
     return v.f;
 }
 
