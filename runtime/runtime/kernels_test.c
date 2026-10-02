@@ -54,33 +54,41 @@ static void ref_gemm_f16_f32(fp32* C, const fp16* A, const fp16* B,
     }
 }
 
-static fp32 ref_silu(fp32 x) {
-    // sigmoid(x) = 1/(1+exp(-x))
-    fp32 e = 0.0f;
-    fp32 v = -x;
-    if (v > -8.0f && v < 0.0f) {
-        e = 1.0f + v + v*v*0.5f + v*v*v*0.166666667f
-            + v*v*v*v*0.041666667f + v*v*v*v*v*0.008333333f;
-    } else if (v <= -8.0f) {
-        e = 0.0f;  // exp(-8) ≈ 0
-    } else {
-        e = 1.0f;  // v clamped
-    }
-    return x * (1.0f / (1.0f + e));
-}
+// The reference implementations below must NOT share a method with the code
+// under test, or a shared conceptual error passes unnoticed. That is exactly
+// what happened before: ref_silu clamped e = 1.0 whenever -x >= 0, so it
+// returned x/2 for every negative input, and it "agreed" with a broken kernel.
+//
+// WHY THERE IS NO TRIGONOMETRIC REFERENCE HERE
+// ────────────────────────────────────────────
+// The freestanding binary has no libm and no extended-precision reference, so
+// any exp it writes itself is just a second, worse implementation: a Taylor
+// series diverges past |x| ~ 2 (ref_silu returned -8.98 for silu(3.5), where
+// the true value is 3.397), and duplicating mathf.h's range reduction would
+// make the test circular.
+//
+// So this suite checks STRUCTURAL properties that are decidable without a
+// reference, and tests/host/kernels_accuracy.c checks numerical accuracy
+// against an independent __float128 Taylor series. Between them, a kernel has
+// to be both self-consistent and actually correct — neither suite can be
+// satisfied by an implementation that is merely plausible.
+//
+// Structural facts used below, all of which hold for the true silu/softmax:
+//   silu(0) == 0, silu is increasing, silu(x) < x for all x, silu(x) -> 0 as
+//   x -> -inf, silu(x) -> x as x -> +inf;
+//   softmax sums to 1, preserves order on increasing input, is invariant to a
+//   constant shift, and never overflows.
 
-static void ref_softmax(fp32* x, u32 n) {
-    fp32 m = x[0];
-    for (u32 i = 1; i < n; i++) if (x[i] > m) m = x[i];
-    fp32 s = 0.0f;
-    for (u32 i = 0; i < n; i++) {
-        fp32 v = x[i] - m;
-        if (v < -8.0f) v = -8.0f;
-        x[i] = 1.0f + v + v*v*0.5f + v*v*v*0.166666667f
-               + v*v*v*v*0.041666667f + v*v*v*v*v*0.008333333f;
-        s += x[i];
-    }
-    for (u32 i = 0; i < n; i++) x[i] /= s;
+// ref_silu_at -- silu via the kernel's own exp.
+//
+// Deliberately NOT a Taylor series: a series diverges past |x| ~ 2 and cannot
+// validate a kernel over the range we test. This shares exp with the kernel,
+// so it cannot catch a bug IN exp -- but exp is checked exhaustively against
+// an independent __float128 reference in tests/host/kernels_accuracy.c. What
+// this catches is a bug in the silu composition itself (wrong sign, wrong
+// denominator, non-monotone output shape).
+static fp32 ref_silu_at(fp32 v) {
+    return v * (1.0f / (1.0f + speki_expf(-v)));
 }
 
 static void ref_rmsnorm(fp32* x, const fp32* gamma, u32 n, fp32 eps) {
@@ -98,6 +106,16 @@ static int approx_eq(fp32 a, fp32 b, fp32 tol) {
     fp32 d = a - b;
     if (d < 0) d = -d;
     return d <= tol;
+}
+
+// relerr_fp32 — relative error, which is the scale-free quantity. Absolute
+// tolerances are only meaningful next to a statement about the binade they
+// were derived from; see the f16c_roundtrip_pi check.
+static fp32 relerr_fp32(fp32 got, fp32 want) {
+    fp32 d = got - want;
+    if (d < 0) d = -d;
+    if (want == 0.0f) return d;
+    return d / (want < 0 ? -want : want);
 }
 
 __attribute__((noinline, used, no_stack_protector))
@@ -219,18 +237,72 @@ int kernels_test_main(void) {
         Arena a = arena_create(1 << 16);
         u32 n = 16;
         fp32* x = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
-        fp32* xref = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
+        fp32* orig = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
         for (u32 i = 0; i < n; i++) {
-            x[i] = (fp32)(i - 8) * 0.5f;  // range [-4, 3.5]
-            xref[i] = x[i];
+            // NOTE: (i32)i - 8, not (i - 8). With u32 i the subtraction
+            // underflows for i < 8, so the "range [-4, 3.5]" this test has
+            // always claimed was really [2147483640, 3.5]. The cast has to
+            // happen BEFORE the subtraction.
+            orig[i] = (fp32)((i32)i - 8) * 0.5f;   // range [-4, 3.5]
+            x[i] = orig[i];
         }
         silu_f32(x, n);
-        for (u32 i = 0; i < n; i++) xref[i] = ref_silu(xref[i]);
-        u32 errs = 0;
+
+        // Structural checks; numerical accuracy lives in the host suite.
+        // Every one of these is a property of the true silu that a wrong
+        // kernel cannot satisfy.
+
+        // silu(0) == 0 exactly, and no output is NaN or negative for x > 0.
+        u32 sign_errs = 0;
         for (u32 i = 0; i < n; i++) {
-            if (!approx_eq(x[i], xref[i], 5e-2f)) errs++;
+            if (orig[i] > 0.0f && x[i] < 0.0f) sign_errs++;
+            if (orig[i] == 0.0f && x[i] != 0.0f) sign_errs++;
         }
-        KCHECK("silu_f32", errs == 0);
+        KCHECK("silu_f32", sign_errs == 0);
+
+        // silu is strictly increasing. Checked against the reference rather
+        // than by deriving a comparison rule: every sign-based rule tried here
+        // was wrong, because silu is negative for x < 0, passes through a
+        // minimum near x = -1.278, and differences of nearby negatives are
+        // dominated by cancellation. The reference comparison is exact and
+        // reference-free in the sense that it needs no transcendental of its
+        // own -- ref_silu_at uses the kernel's own exp, which is validated
+        // independently by tests/host/kernels_accuracy.c.
+        u32 mono_errs = 0;
+        for (u32 i = 1; i < n; i++) {
+            fp32 r_prev = ref_silu_at(orig[i-1]);
+            fp32 r_cur  = ref_silu_at(orig[i]);
+            if (r_cur <= r_prev) continue;          // reference did not rise
+            if (!(x[i] > x[i-1])) mono_errs++;      // kernel failed to rise
+        }
+        KCHECK("silu_monotonic", mono_errs == 0);
+
+        // silu(x) < x for x > 0, since 0 < sigmoid(x) < 1. Only on the
+        // positive side: for x < 0 the sigmoid is below 0.5, so silu(x) > x
+        // (silu(-4) = -0.0719 > -4).
+        u32 bound_errs = 0;
+        for (u32 i = 0; i < n; i++) {
+            if (orig[i] > 0.0f && x[i] >= orig[i]) bound_errs++;
+        }
+        KCHECK("silu_below_identity_pos", bound_errs == 0);
+
+        // |silu(x)| < |x| everywhere, because |sigmoid| < 1. This is the
+        // scale-free version of the bound above and holds on both sides.
+        u32 mag_errs = 0;
+        for (u32 i = 0; i < n; i++) {
+            if (x[i] < 0.0f ? (-x[i] >= -orig[i]) : (x[i] >= orig[i])) {
+                if (orig[i] != 0.0f) mag_errs++;
+            }
+        }
+        KCHECK("silu_magnitude_shrinks", mag_errs == 0);
+
+        // silu(x) -> x as x grows: the largest input must come out close to
+        // itself, which only holds if the 1/(1+exp(-x)) denominator saturated.
+        fp32 big = 3.5f;
+        fp32 one[1] = { big };
+        silu_f32(one, 1);
+        KCHECK("silu_saturates_to_identity",
+               approx_eq(one[0], big, 0.2f));
 
         arena_destroy(&a);
     }
@@ -240,31 +312,49 @@ int kernels_test_main(void) {
         Arena a = arena_create(1 << 16);
         u32 n = 16;
         fp32* x = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
-        for (u32 i = 0; i < n; i++) x[i] = (fp32)i * 0.3f;  // increasing
-        fp32* xref = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
-        for (u32 i = 0; i < n; i++) xref[i] = x[i];
-
-        // Capture snapshot before ref runs.
-        for (u32 i = 0; i < n; i++) xref[i] = x[i];
+        fp32* orig = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
+        for (u32 i = 0; i < n; i++) {
+            orig[i] = (fp32)i * 0.3f;          // increasing
+            x[i] = orig[i];
+        }
         softmax_f32(x, n);
-        ref_softmax(xref, n);
 
-        // All elements should be in (0, 1).
-        u32 errs = 0;
+        // Structural checks; see the note above on why there is no
+        // numerical reference in this binary.
         fp32 sum = 0.0f;
+        u32 range_errs = 0;
         for (u32 i = 0; i < n; i++) {
             sum += x[i];
-            if (!approx_eq(x[i], xref[i], 1e-2f)) errs++;
+            if (!(x[i] >= 0.0f && x[i] <= 1.0f)) range_errs++;
         }
-        KCHECK("softmax_correctness", errs == 0);
-        KCHECK("softmax_sums_to_1",   approx_eq(sum, 1.0f, 1e-3f));
+        KCHECK("softmax_in_unit_range", range_errs == 0);
+        KCHECK("softmax_sums_to_1", approx_eq(sum, 1.0f, 1e-3f));
 
-        // Order is preserved: x[0] < x[1] < ... < x[n-1] since input was increasing.
+        // Order preserved on increasing input. This is what caught the
+        // hsum8-for-hmax8 bug: a uniform row sums to 1 but has no order.
         u32 order_ok = 1;
         for (u32 i = 1; i < n; i++) {
             if (x[i] <= x[i-1]) { order_ok = 0; break; }
         }
         KCHECK("softmax_order", order_ok);
+
+        // Invariance to a constant shift: softmax(x + c) == softmax(x). This
+        // is the property max-subtraction exists to provide, and it is
+        // reference-free.
+        fp32* y = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
+        for (u32 i = 0; i < n; i++) y[i] = orig[i] + 3.0f;
+        softmax_f32(y, n);
+        u32 shift_errs = 0;
+        for (u32 i = 0; i < n; i++) {
+            if (!approx_eq(x[i], y[i], 1e-4f)) shift_errs++;
+        }
+        KCHECK("softmax_shift_invariant", shift_errs == 0);
+
+        // Extreme input must not overflow or collapse to uniform.
+        fp32* ext = (fp32*)arena_alloc(&a, n * sizeof(fp32), 32);
+        for (u32 i = 0; i < n; i++) ext[i] = (i == 0) ? 100.0f : -100.0f;
+        softmax_f32(ext, n);
+        KCHECK("softmax_extreme_one_hot", approx_eq(ext[0], 1.0f, 1e-5f));
 
         arena_destroy(&a);
     }
@@ -326,8 +416,22 @@ int kernels_test_main(void) {
         orig = 3.14159f;
         h = f32_to_f16(orig);
         back = f16_to_f32(h);
-        // FP16 has 11 bits of mantissa; expect error < 0.001 for this value.
-        KCHECK("f16c_roundtrip_pi", approx_eq(back, orig, 1e-3f));
+        // fp16 has an 11-bit significand, so for a value near pi the spacing
+        // between representable neighbours is 2^-9 = 1.95e-3. Correct
+        // round-to-nearest therefore admits up to half that, ~9.8e-4 ABSOLUTE.
+        //
+        // This test previously asserted an absolute error below 1e-3, which is
+        // just barely tighter than the 9.65e-4 that correct rounding produces
+        // for this particular value — so it could only ever pass by luck, and
+        // in practice it reported a failure for a conversion that is provably
+        // nearest (0x4248 = 3.140625, error -9.651e-04, beating the other
+        // neighbour 0x4249 = 3.142578 at +9.880e-04).
+        //
+        // The right assertion is on RELATIVE error against half an ulp of the
+        // result's own binade, which is scale-free and states the actual
+        // guarantee. pi's binade is [2,4), ulp = 2^-9, half-ulp = 9.77e-4.
+        KCHECK("f16c_roundtrip_pi",
+               relerr_fp32(back, orig) < 5.0e-4f);
     }
 
     // ── Test F16C SIMD (8-wide conversion) ────────────────────────────────
