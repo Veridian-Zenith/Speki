@@ -19,11 +19,11 @@
     },
     {
       "name": "dev",
-      "displayName": "Development \u2014 RelWithDebInfo, warnings, host tests on",
+      "displayName": "Development \u2014 native CPU, -O2, -Werror, host tests on",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "SPEKI_ARCH": "alderlake",
+        "SPEKI_ARCH": "native",
         "SPEKI_OPT": "O2",
         "SPEKI_WERROR": "ON",
         "SPEKI_HOST_TESTS": "ON",
@@ -32,11 +32,11 @@
     },
     {
       "name": "release",
-      "displayName": "Release \u2014 O3, stripped, warnings not fatal",
+      "displayName": "Release \u2014 portable x86-64-v2, -O3, stripped",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "SPEKI_ARCH": "alderlake",
+        "SPEKI_ARCH": "x86-64-v2",
         "SPEKI_OPT": "O3",
         "SPEKI_WERROR": "OFF",
         "SPEKI_HOST_TESTS": "OFF",
@@ -58,7 +58,7 @@
     },
     {
       "name": "portable",
-      "displayName": "Portable \u2014 x86-64-v2 baseline, runs on older hardware",
+      "displayName": "Portable \u2014 x86-64 baseline, runs on older hardware",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",

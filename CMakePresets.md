@@ -22,6 +22,20 @@
 #             SPEKI_HOST_TESTS=ON; the freestanding binary cannot be built
 #             under ASan without an ASan runtime.
 #
+# ─── ARCHITECTURE: WHY THE DEFAULTS DIFFER ────────────────────────────────
+#
+# The project default for SPEKI_ARCH is `native`. That is right for local
+# development: one machine, and the fastest thing it can actually run.
+#
+# It is the WRONG default for anything built for hardware you do not control —
+# CI, releases, anything another person runs. `native` on a build machine means
+# "whatever CPU this machine happens to be", and that changes without notice.
+#
+# This is not hypothetical. CI ran on an AMD EPYC 7763 (Zen 3) while development
+# was on Intel Alder Lake, and a binary built for alderlake died there with
+# SIGILL partway through the kernel tests. So CI sets SPEKI_ARCH explicitly, and
+# so does the `release` preset. Do not remove those.
+#
 # OVERRIDING ANY VALUE
 #   Command line:  cmake -B build/cmake --preset dev -DSPEKI_ARCH=native
 #   Environment:   SPEKI_ARCH=native cmake -B build/cmake --preset dev
@@ -29,13 +43,24 @@
 #   not already set, so -D wins over env. Configure into a fresh build dir
 #   if you want the environment to take effect over an earlier -D.
 #
-# THE ARCH TRAP — read before using --preset native or setting SPEKI_ARCH
-#   Consumer Alder Lake has NO AVX-512, NO VNNI and NO AMX silicon. The
-#   default arch is 'alderlake' for that reason. -march=native on this
-#   machine is safe: it resolves to exactly what the CPU supports. But
-#   building with an arch that DOES have AVX-512 (skylake-avx512,
-#   sapphirerapids, znver4, ...) and running the result here WILL SIGILL at
-#   startup. The build cannot detect the mismatch — only running it can.
+# The configure step prints the resolved configuration, so a build dir never
+# has to be reverse-engineered to find out how it was configured.
+#
+# ARCH TRAPS — read before using --preset native or setting SPEKI_ARCH
+#   Consumer Alder Lake has NO AVX-512, NO VNNI and NO AMX silicon.
+#   -march=native on such a machine is safe: it resolves to exactly what the
+#   CPU supports. But building with an arch that DOES have AVX-512
+#   (skylake-avx512, sapphirerapids, znver4, ...) and running the result on
+#   hardware without it WILL SIGILL. The build cannot detect the mismatch —
+#   only running the binary can.
+#
+#   x86-64-v2 sidesteps the whole class of problem, which is why CI and the
+#   release preset use it.
+#
+#   Caveat on `native` and vendor features: some CPUs gate extensions behind
+#   kernel driver checks rather than CPUID, and those do not carry into a
+#   static binary built for `native`. If one of those is needed, name the arch
+#   explicitly instead.
 #
 then build with:                           cmake --build build/cmake
 

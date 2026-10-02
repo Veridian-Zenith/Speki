@@ -138,8 +138,18 @@ speki_default(SPEKI_CSTD_REQUESTED SPEKI_CSTD ""
 speki_default(SPEKI_CXXSTD      SPEKI_CXXSTD      "c++26"
   "C++ dialect for any C++ target: c++26, c++23, c++20. Unused while pure C.")
 
-speki_default(SPEKI_ARCH        SPEKI_ARCH        "alderlake"
-  "Value for -march and -mtune. 'alderlake' matches this project's baseline CPU.")
+# TARGET ARCHITECTURE
+# ─────────────────────
+# Default: native. This project is developed on one machine, so the fastest
+# thing for a local build is what that machine can actually run -- including
+# instructions newer than any named baseline.
+#
+# CI and any build meant to be shipped set this explicitly, via -DSPEKI_ARCH= or
+# the SPEKI_ARCH env var. Never rely on the default there: "native" on a build
+# machine means "whatever CPU the CI runner happens to be", and those change
+# without notice.
+speki_default(SPEKI_ARCH        SPEKI_ARCH        "native"
+  "Value for -march/-mtune: native, x86-64-v2, x86-64-v3, alderlake, ...")
 
 speki_default(SPEKI_OPT         SPEKI_OPT         "O3"
   "Optimization level passed to -<value>.")

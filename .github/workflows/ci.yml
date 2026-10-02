@@ -66,6 +66,18 @@ env:
   BUILD_DIR: build/cmake
   # The LLVM major version every job installs. See the header note.
   SPEKI_LLVM_VERSION: "23"
+  # Target ISA for every CI build, set EXPLICITLY.
+  #
+  # Never leave this as the project default here. The default is "native", which
+  # on a build machine means "whatever CPU the runner happens to be" -- and those
+  # change without notice. This is not hypothetical: CI ran on an AMD EPYC 7763
+  # (Zen 3) while development was on Intel Alder Lake, and a binary built for
+  # alderlake died there with SIGILL.
+  #
+  # x86-64-v2 is the portable baseline: SSE4.2, POPCNT, CMPXCHG16B. It runs on
+  # essentially every x86-64 made since ~2009. CI uses it because it must pass on
+  # hardware we do not control.
+  SPEKI_ARCH_CI: "x86-64-v2"
 
 jobs:
   build:
@@ -82,7 +94,8 @@ jobs:
       - name: Configure
         run: |
           cmake -B ${{ env.BUILD_DIR }} --preset dev \
-            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}" \
+            -DSPEKI_ARCH="${{ env.SPEKI_ARCH_CI }}"
 
       - name: Build
         run: cmake --build ${{ env.BUILD_DIR }}
@@ -187,7 +200,8 @@ jobs:
       - name: Configure
         run: |
           cmake -B ${{ env.BUILD_DIR }} --preset dev \
-            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}" \
+            -DSPEKI_ARCH="${{ env.SPEKI_ARCH_CI }}"
 
       - name: Build the host accuracy suite
         run: cmake --build ${{ env.BUILD_DIR }} --target speki_kernels_host
@@ -219,7 +233,8 @@ jobs:
       - name: Configure (for compile_commands.json)
         run: |
           cmake -B ${{ env.BUILD_DIR }} --preset dev \
-            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}" \
+            -DSPEKI_ARCH="${{ env.SPEKI_ARCH_CI }}"
 
       - name: Run clang-tidy
         # The check list and the reasoning behind it live in .clang-tidy.
@@ -245,7 +260,8 @@ jobs:
       - name: Configure (release)
         run: |
           cmake -B build/release --preset release \
-            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}"
+            -DCMAKE_C_COMPILER="$LLVM_BIN_DIR/clang-${{ env.SPEKI_LLVM_VERSION }}" \
+            -DSPEKI_ARCH="${{ env.SPEKI_ARCH_CI }}"
 
       - name: Build
         run: cmake --build build/release

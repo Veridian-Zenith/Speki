@@ -157,12 +157,15 @@ Everything about the toolchain is configurable. Presets cover the common
 cases; every value can also come from the environment.
 
 ```sh
-cmake -B build/cmake --preset dev       # -O2, -Werror, host tests, symbols
-cmake -B build/cmake --preset release   # -O3, stripped
-cmake -B build/cmake --preset native    # -march=native for this machine
+cmake -B build/cmake --preset dev       # native CPU, -O2, -Werror, symbols
+cmake -B build/cmake --preset release   # x86-64-v2, -O3, stripped  (ships)
 cmake -B build/cmake --preset portable  # x86-64-v2 baseline
 cmake -B build/cmake --preset asan      # sanitizers, host tests only
 ```
+
+`SPEKI_ARCH` defaults to `native`, which is right for local work and wrong for
+anything built for hardware you don't control — CI and `release` therefore set
+it explicitly. See [CMakePresets.md](CMakePresets.md).
 
 Any value can be overridden from the environment, which takes precedence over
 the preset:
@@ -174,7 +177,7 @@ SPEKI_ARCH=native SPEKI_OPT=O1 cmake -B build/cmake --preset dev
 | Variable | Default | Meaning |
 |---|---|---|
 | `SPEKI_CSTD` | `c2x` | C dialect. clang 23 has no `-std=c26`; see below |
-| `SPEKI_ARCH` | `alderlake` | `-march` / `-mtune` target |
+| `SPEKI_ARCH` | `native` | `-march` / `-mtune` target. CI and `release` set this explicitly |
 | `SPEKI_OPT` | `O3` | Optimization level |
 | `SPEKI_WERROR` | `OFF` | Warnings as errors |
 | `SPEKI_STRIP` | `ON` | Strip the binary |
@@ -196,10 +199,11 @@ flag policy — the comments there explain *why* each flag is present.
 > than `gnu2x` so a GNU extension cannot creep in unremarked.
 
 > **The arch trap.** Consumer Alder Lake has no AVX-512, no VNNI and no AMX
-> silicon, which is why the default is `alderlake`. `--preset native` is safe
-> on this machine. Building with an arch that *does* have AVX-512
-> (`skylake-avx512`, `sapphirerapids`, …) and running the result here will
-> SIGILL. The build cannot detect that mismatch.
+> silicon. `-march=native` here resolves to exactly what this CPU supports, so
+> it is safe — but naming an arch that *does* have AVX-512 (`skylake-avx512`,
+> `sapphirerapids`, …) and running the result on hardware without it will
+> SIGILL, and the build cannot detect that. CI learned this the hard way: it
+> runs on AMD EPYC (Zen 3), not Alder Lake.
 
 ## Testing
 
