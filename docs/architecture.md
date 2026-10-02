@@ -15,7 +15,9 @@ compiler-rt. That means:
 - No buffered stdio — `raw_io.h` writes straight to file descriptors.
 
 The payoff is a ~40 KB static binary with no dynamic dependencies at all.
-`just inspect` verifies this: no interpreter, no loader, no undefined symbols.
+The CI job `Verify the binary is genuinely freestanding` checks this on
+every push: no interpreter, no loader, no shared library dependencies,
+no undefined symbols.
 
 ## Why `_start` is hand-written
 
