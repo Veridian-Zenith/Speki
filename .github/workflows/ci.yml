@@ -74,16 +74,23 @@ env:
   # (Zen 3) while development was on Intel Alder Lake, and a binary built for
   # alderlake died there with SIGILL.
   #
-  # `nehalem` is the portable baseline: SSE4.2, POPCNT, CMPXCHG16B. It runs on
-  # essentially every x86-64 made since ~2009, and CI must pass on hardware we
-  # do not control.
+  # `haswell` is the most portable arch this codebase can actually build.
   #
-  # Not "x86-64-v2", which is the psABI spelling of the same feature level and
-  # reads better. It does not exist in the apt.llvm.org build: its valid-CPU
-  # list jumps straight from znver6 to plain x86-64, with no v2/v3/v4 levels.
-  # Those are upstream-clang-only. Verify with:
-  #   clang-23 -march=<name> -fsyntax-only -x c /dev/null
-  SPEKI_ARCH_CI: "nehalem"
+  # It is AVX2 + FMA + F16C, which the kernels require -- they are hand-written
+  # with those intrinsics and there is no SSE fallback path, so an older
+  # baseline fails to compile rather than merely being slow:
+  #
+  #   always_inline function '_mm256_fmadd_ps' requires target feature 'fma'
+  #
+  # What this buys is the absence of everything newer and vendor-specific:
+  # no AVX-512, no VNNI, no GFNI/VAES/VPCLMULQDQ, no Alder Lake tuning. That is
+  # the portable choice available today. True "basic x86-64" needs SSE
+  # implementations of every kernel, which is a real piece of work and is on the
+  # roadmap rather than pretended here.
+  #
+  # Not "x86-64-v2": that spelling does not exist in the apt.llvm.org build,
+  # whose valid-CPU list jumps straight from znver6 to plain x86-64.
+  SPEKI_ARCH_CI: "haswell"
 
 jobs:
   build:

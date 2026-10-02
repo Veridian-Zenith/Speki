@@ -54,10 +54,12 @@
 #   hardware without it WILL SIGILL. The build cannot detect the mismatch —
 #   only running the binary can.
 #
-#   nehalem sidesteps the whole class of problem, which is why CI and the
-#   release preset use it. Note it is spelled `nehalem`, not `x86-64-v2`: the
-#   psABI v2/v3/v4 levels are upstream-clang-only and are absent from the
-#   apt.llvm.org build. speki_validate_arch() now catches that at configure time.
+#   haswell sidesteps the whole class of problem, which is why CI and the
+#   release preset use it: AVX2/FMA/F16C with no AVX-512, no VNNI, no
+#   vendor-specific tuning. It is not `x86-64-v2`, which is both older than the
+#   kernels need and absent from the apt.llvm.org build (its valid-CPU list
+#   jumps from znver6 straight to plain x86-64). speki_validate_arch() catches
+#   an unknown CPU at configure time rather than mid-build.
 #
 #   Caveat on `native` and vendor features: some CPUs gate extensions behind
 #   kernel driver checks rather than CPUID, and those do not carry into a

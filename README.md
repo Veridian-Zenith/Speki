@@ -32,6 +32,9 @@ happens to be installed is a portability bug, not a feature.
 3. **Small first.** A model that fits in memory and runs in seconds can be
    debugged end to end. Optimising for a size you cannot yet run is how
    projects end up with fast kernels and an unrunnable model.
+4. **No stale claims.** If something does not work, the docs say so. A build
+   system that reports success while the binary crashes is worse than one that
+   refuses to build.
 
 ## Quick start
 
@@ -100,6 +103,15 @@ of what still has to be built.
 - **Missing kernels.** `layernorm_f32`, `gelu_f32`, `rope_f32`,
   `attention_f16_f32` and `raw_blas.h` are referenced in comments but do not
   exist. `rope` is unusable without the exp in `mathf.h`, which now works.
+- **AVX2 is required; there is no SSE fallback.** Every kernel is hand-written
+  with AVX2/FMA/F16C intrinsics, so an older `-march` does not merely run
+  slower, it fails to compile:
+
+      always_inline function '_mm256_fmadd_ps' requires target feature 'fma'
+
+  The most portable target today is therefore `haswell` (AVX2 + FMA + F16C,
+  nothing newer or vendor-specific). Genuinely basic x86-64 needs SSE
+  implementations of every kernel — real work, not a flag change.
 
 **Deliberate limitations:**
 
@@ -177,7 +189,7 @@ SPEKI_ARCH=native SPEKI_OPT=O1 cmake -B build/cmake --preset dev
 | Variable | Default | Meaning |
 |---|---|---|
 | `SPEKI_CSTD` | `c2x` | C dialect. clang 23 has no `-std=c26`; see below |
-| `SPEKI_ARCH` | `native` | `-march` / `-mtune` target. CI and `release` set this explicitly |
+| `SPEKI_ARCH` | `native` | `-march` / `-mtune`. CI and `release` use `haswell` |
 | `SPEKI_OPT` | `O3` | Optimization level |
 | `SPEKI_WERROR` | `OFF` | Warnings as errors |
 | `SPEKI_STRIP` | `ON` | Strip the binary |

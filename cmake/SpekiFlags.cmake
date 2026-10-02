@@ -254,14 +254,24 @@ endfunction()
 function(speki_apply_flags target)
   target_compile_options(${target} PRIVATE
     # ── ISA selection ──
-    # SPEKI_ARCH drives both -march and -mtune. The explicit -m flags below
-    # are redundant under -march=alderlake but keep the intent readable and
-    # survive someone overriding SPEKI_ARCH with something narrower.
+    # SPEKI_ARCH drives both -march and -mtune.
+    #
+    # The explicit -m flags below ARE redundant under any -march that implies
+    # them, and they were briefly removed to see whether the arch setting alone
+    # was enough. It is not: the kernels are hand-written AVX2/FMA/F16C, and
+    # with only -march=nehalem the build fails with
+    #
+    #   always_inline function '_mm256_fmadd_ps' requires target feature 'fma'
+    #   AVX vector return of type '__m256' without 'avx' enabled changes the ABI
+    #
+    # There is no SSE fallback path in this codebase, so the build genuinely
+    # requires AVX2 + FMA + F16C. Setting these explicitly is honest about that:
+    # it says "this project needs these three extensions", rather than relying on
+    # a particular -march to imply them. A baseline without AVX2 is not
+    # supported yet -- see the roadmap.
     -march=${SPEKI_ARCH}
     -mtune=${SPEKI_ARCH}
     -mavx2 -mfma -mf16c
-    -mbmi -mbmi2 -madx
-    -mgfni -mvaes -mpclmul
 
     # ── Optimization ──
     -${SPEKI_OPT}
