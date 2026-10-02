@@ -36,7 +36,7 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "SPEKI_ARCH": "x86-64-v2",
+        "SPEKI_ARCH": "nehalem",
         "SPEKI_OPT": "O3",
         "SPEKI_WERROR": "OFF",
         "SPEKI_HOST_TESTS": "OFF",
@@ -62,7 +62,7 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "SPEKI_ARCH": "x86-64-v2",
+        "SPEKI_ARCH": "nehalem",
         "SPEKI_OPT": "O3",
         "SPEKI_HOST_TESTS": "OFF",
         "SPEKI_STRIP": "ON"

@@ -54,8 +54,10 @@
 #   hardware without it WILL SIGILL. The build cannot detect the mismatch —
 #   only running the binary can.
 #
-#   x86-64-v2 sidesteps the whole class of problem, which is why CI and the
-#   release preset use it.
+#   nehalem sidesteps the whole class of problem, which is why CI and the
+#   release preset use it. Note it is spelled `nehalem`, not `x86-64-v2`: the
+#   psABI v2/v3/v4 levels are upstream-clang-only and are absent from the
+#   apt.llvm.org build. speki_validate_arch() now catches that at configure time.
 #
 #   Caveat on `native` and vendor features: some CPUs gate extensions behind
 #   kernel driver checks rather than CPUID, and those do not carry into a

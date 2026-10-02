@@ -55,6 +55,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SpekiFlags.cmake")
 # result, and calling it from inside a function() would scope the SPEKI_CSTD
 # assignment to that function.
 speki_detect_cstd()
+speki_validate_arch()
 
 speki_print_config()
 

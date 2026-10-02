@@ -74,10 +74,16 @@ env:
   # (Zen 3) while development was on Intel Alder Lake, and a binary built for
   # alderlake died there with SIGILL.
   #
-  # x86-64-v2 is the portable baseline: SSE4.2, POPCNT, CMPXCHG16B. It runs on
-  # essentially every x86-64 made since ~2009. CI uses it because it must pass on
-  # hardware we do not control.
-  SPEKI_ARCH_CI: "x86-64-v2"
+  # `nehalem` is the portable baseline: SSE4.2, POPCNT, CMPXCHG16B. It runs on
+  # essentially every x86-64 made since ~2009, and CI must pass on hardware we
+  # do not control.
+  #
+  # Not "x86-64-v2", which is the psABI spelling of the same feature level and
+  # reads better. It does not exist in the apt.llvm.org build: its valid-CPU
+  # list jumps straight from znver6 to plain x86-64, with no v2/v3/v4 levels.
+  # Those are upstream-clang-only. Verify with:
+  #   clang-23 -march=<name> -fsyntax-only -x c /dev/null
+  SPEKI_ARCH_CI: "nehalem"
 
 jobs:
   build:

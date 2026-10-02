@@ -181,6 +181,41 @@ speki_default(SPEKI_EXTRA_LDFLAGS SPEKI_EXTRA_LDFLAGS ""
 # Sets the C standard and anything that must be in place before the target's
 # own options are assembled.
 
+# speki_validate_arch
+#
+# Check that the compiler actually accepts -march=<SPEKI_ARCH>, and fail at
+# CONFIGURE time with an actionable message if it does not.
+#
+# This is not hypothetical. The build asked for -march=x86-64-v2, which the local
+# upstream clang accepts but the apt.llvm.org build does not -- its valid-CPU
+# list goes straight from znver6 to plain x86-64, with no v2/v3/v4 levels, since
+# those are upstream-only spellings of the psABI feature levels. The mismatch
+# surfaced as four "unknown target CPU" errors partway through every CI build,
+# after the toolchain had already been installed.
+#
+# Checking here costs one compiler invocation and turns a confusing mid-build
+# failure into a single clear line at configure time.
+function(speki_validate_arch)
+  # A compiler that cannot parse even a trivial program for this arch will fail
+  # here; that is the point.
+  set(CMAKE_REQUIRED_FLAGS "-march=${SPEKI_ARCH}")
+  set(CMAKE_REQUIRED_QUIET ON)
+  check_c_source_compiles("int main(void){return 0;}" SPEKI_ARCH_OK_${SPEKI_ARCH})
+  unset(CMAKE_REQUIRED_FLAGS)
+
+  if(NOT SPEKI_ARCH_OK_${SPEKI_ARCH})
+    message(FATAL_ERROR
+      "speki: this compiler does not accept -march=${SPEKI_ARCH}.\n"
+      "List the CPUs it knows with:\n"
+      "  ${CMAKE_C_COMPILER} -march=help\n"
+      "Common portable baselines: nehalem (SSE4.2 era, ~2008+), "
+      "sandybridge, x86-64 (plain baseline).\n"
+      "Note that the psABI spellings x86-64-v2/v3/v4 exist only in upstream "
+      "clang, not in every distribution build.")
+  endif()
+  message(STATUS "speki: target CPU ${SPEKI_ARCH} accepted")
+endfunction()
+
 function(speki_apply_toolchain target)
 
   # Set the dialect explicitly rather than via target_compile_features, which
