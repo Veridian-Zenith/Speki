@@ -16,20 +16,29 @@
 
 // Speki-flavored openat flag aliases (kernel ABI constants, not redefined).
 //
-// These are written with the 0o prefix rather than a leading zero. A bare
-// leading-zero literal is the old octal spelling, which C26 deprecates
-// (-Wdeprecated-octal-literals); under -std=c2y with -Werror that is a build
-// failure, not a warning. The VALUES are unchanged: 0o100 == 0100 == 64, and
-// 0o2000000 == 02000000 == O_CLOEXEC.
+// These are HEX, and that is deliberate. Two other spellings look reasonable
+// and both break the build somewhere it matters:
+//
+//   0100, 0200, ...   old-style octal. C26 deprecates it
+//                     (-Wdeprecated-octal-literals), which under -Werror with
+//                     -std=c2y is a hard error.
+//   0o100, 0o2000000  the C23 spelling, so also deprecated-clean. But the
+//                     0o prefix only became a supported spelling in clang 21,
+//                     and Ubuntu 24.04 -- what CI runs on -- ships clang 18,
+//                     which rejects it outright:
+//                         error: invalid suffix 'o2000000' on integer constant
+//
+// Hex sidesteps both: no dialect dependence, no compiler-version dependence,
+// and the digits line up with the kernel's own UAPI headers.
 #define O_RDONLY_RAW   0
 #define O_WRONLY_RAW   1
 #define O_RDWR_RAW     2
-#define O_CREAT_RAW    0o100
-#define O_EXCL_RAW     0o200
-#define O_TRUNC_RAW    0o1000
-#define O_APPEND_RAW   0o2000
-#define O_NONBLOCK_RAW 0o4000
-#define O_CLOEXEC_RAW  0o2000000
+#define O_CREAT_RAW    0x40
+#define O_EXCL_RAW     0x80
+#define O_TRUNC_RAW    0x200
+#define O_APPEND_RAW   0x400
+#define O_NONBLOCK_RAW 0x800
+#define O_CLOEXEC_RAW  0x80000
 #define AT_FDCWD_RAW   -100
 
 // raw_pread64(fd, buf, len, off) → bytes read, 0 on EOF, -errno on error

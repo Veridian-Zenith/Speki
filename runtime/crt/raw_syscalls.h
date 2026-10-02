@@ -196,17 +196,18 @@ static inline i32 raw_openat(i32 dirfd, const char* path, i32 flags, u32 mode) {
     return (i32)SPEKI_SYSCALL4(SYS_openat, dirfd, path, flags, mode);
 }
 
-// 0o prefix, not bare leading-zero: C26 deprecates the old octal spelling
-// (-Wdeprecated-octal-literals). Values unchanged.
+// Hex, not octal. C26 deprecates bare leading-zero octal, and the C23 0o
+// spelling needs clang 21+ while CI runs clang 18. See raw_io.h for the full
+// reasoning; the values are identical either way.
 #define O_RDONLY  0
 #define O_WRONLY  1
 #define O_RDWR    2
-#define O_CREAT   0o100
-#define O_EXCL    0o200
-#define O_TRUNC   0o1000
-#define O_APPEND  0o2000
-#define O_NONBLOCK 0o4000
-#define O_CLOEXEC 0o2000000
+#define O_CREAT   0x40
+#define O_EXCL    0x80
+#define O_TRUNC   0x200
+#define O_APPEND  0x400
+#define O_NONBLOCK 0x800
+#define O_CLOEXEC 0x80000
 #define AT_FDCWD  -100
 
 static inline i32 raw_close(i32 fd) {
