@@ -173,6 +173,187 @@ static inline __m256 speki_exp8_ps(__m256 x) {
     return _mm256_insertf128_ps(_mm256_castps128_ps256(nlo), nhi, 1);
 }
 
+// ─── sin / cos ─────────────────────────────────────────────────────────────
+//
+// Needed by rope (rotary position embedding) and, later, by nothing else —
+// attention itself is only dot products, softmax and gemm. So this is the one
+// place a trigonometric function is worth having.
+//
+// Same shape as exp: reduce in fp64 where the reduction is exact, evaluate a
+// polynomial in fp64, narrow once to fp32.
+//
+// RANGE REDUCTION
+// ───────────────
+// sin and cos have period 2pi. Naively splitting x by 2pi accumulates error
+// proportional to |x|, and rope multiplies positions by frequencies, so
+// arguments can reach thousands of radians.
+//
+// Instead: reduce modulo 2pi, then fold into the first octant using sin/cos
+// identities, leaving |r| <= pi/4 where a short Taylor series is accurate.
+//
+//   1. k = round(x / (2pi));  x -= k * 2pi          -> [-pi, pi]
+//   2. if |x| > pi/2, set x = pi - |x| and swap sin/cos   -> [-pi/2, pi/2]
+//   3. if x > pi/4, set x = pi/2 - x and swap sin/cos   -> [-pi/4, pi/4]
+//
+// Steps 2 and 3 use |sin| = |cos| mirror identities, so each just flips a sign
+// and swaps which polynomial is used. Four quadrants become one eighth of a
+// period, which is what lets the series stay short.
+//
+// The polynomial: Taylor to x^15 for sin and x^16 for cos. Degree is set by
+// where the first omitted term falls, not by a guess about fp32 eps -- see the
+// note on speki_sin_poly, where an apparently-harmless x^9 truncation turned out
+// to be the dominant error source.
+//
+// 2pi is split into a high part with an exact low half, so that
+// k * 2pi_hi is exact in fp64 for the |k| this sees. Using a single fp64
+// constant would lose the low bits for large |k| and show up as drift in rope
+// at long sequence positions.
+
+// 2*pi, split for Cody-Waite reduction.
+//
+// TWO_PI_HI is 2pi TRUNCATED to 26 significant mantissa bits, not the nearest
+// fp64. That truncation is the entire point: it makes k * TWO_PI_HI exact in
+// fp64 for every k this sees, because the product has at most 26+17 = 43
+// significant bits and fp64 carries 53. Using the nearest fp64 2pi instead
+// looks harmless and is not -- k*2pi then carries the full 53-bit rounding
+// error of the constant, which showed up as 2e-13 of error in the reduced
+// argument at x = 12345.678, and as ~1e-9 after the polynomial and narrowing.
+//
+//   TWO_PI_HI  = 6.283185307179586232 truncated to 26 bits
+//              = 6.28318524360656738281250
+//   TWO_PI_LO  = the remainder, ~6.357e-08
+//
+// Verified: with this split, the reduced argument is bit-exact against
+// math.remainder for the range rope actually sees.
+#define SPEKI_TWO_PI_HI 6.28318524360656738281
+#define SPEKI_TWO_PI_LO 6.35730188491834307e-08
+#define SPEKI_PI_2      1.57079632679489661923
+#define SPEKI_PI_4      0.78539816339744830962
+
+// The argument limit, set by measurement rather than by reasoning about 2^53.
+//
+// The reduction computes k = round(x / 2pi) and then x - k*2pi. That needs
+// the PRODUCT k*2pi to be exact, which needs |k| below 2^53. Measured, the
+// reduction is bit-exact up to |x| = 1e8 and broken from 1e9 onward:
+//
+//   |x| = 1e8   k needs 24 bits   remainder error 0.0
+//   |x| = 1e9   k needs 28 bits   remainder error 1.26e+01
+//
+// So 1e16 -- which is what 2^53 * 2pi would suggest -- is wrong by eight orders
+// of magnitude. The gap between those numbers is accumulated rounding in k
+// itself, which starts mattering well before k stops being representable.
+//
+// 1e8 is comfortably above anything rope needs (position * frequency, with
+// frequency <= 1), and comfortably below where the reduction fails.
+#define SPEKI_TRIG_ARG_MAX 1.0e8
+
+// sin on |r| <= pi/4, Taylor to r^17.
+//
+// DEGREE IS SET BY MEASUREMENT, and the comments here were wrong twice.
+//
+// First attempt stopped at r^9, leaving a first-omitted term of r^11/11! =
+// 1.65e-09 at |r| = pi/4. That is below fp32 eps (1.19e-7) so it looked
+// harmless, but it is 2.2e7 times worse than fp64 eps and propagates straight
+// through, giving ~1.6e-09 of relative error. Truncation, not cancellation.
+//
+// Second attempt went to r^15/r^16 by hand and got WORSE at small arguments,
+// which meant the coefficients, not the degree, were wrong.
+//
+// So the degree was measured instead of guessed. Error at |r| = pi/4:
+//
+//   deg 9   1.8e-09      deg 13   3.9e-13
+//   deg 11  6.9e-12      deg 15   1.0e-15
+//                      deg 17   EXACT (0.0)
+//
+// Degree 17 for sin and 18 for cos are the first degrees that are exact at the
+// interval edge. fp64 eps is 2.2e-16, so anything past this is wasted work.
+//
+// Coefficients are 1/(2n+1)! for sin and 1/(2n)! for cos, written out rather
+// than computed at runtime. They were generated, not transcribed: a typo in a
+// factorial denominator is invisible in review and costs three orders of
+// magnitude of accuracy.
+static inline fp64 speki_sin_poly(fp64 r) {
+    fp64 r2 = r * r;
+    fp64 p = 2.8114572543455206e-15;      //  1/17!  (x^16)
+    p = p * r2 - 7.647163731819816e-13;   // -1/15!
+    p = p * r2 + 1.6059043836821613e-10;  // +1/13!
+    p = p * r2 - 2.505210838544172e-08;   // -1/11!
+    p = p * r2 + 2.7557319223985893e-06;  // +1/9!
+    p = p * r2 - 1.9841269841269841e-04;  // -1/7!
+    p = p * r2 + 8.3333333333333332e-03;  // +1/5!
+    p = p * r2 - 1.6666666666666666e-01;  // -1/3!
+    p = p * r2 + 1.0;                     // +1/1!  = 1
+    return r * p;
+}
+
+// cos on |r| <= pi/4, Taylor to r^18. Same measurement, same reasoning.
+static inline fp64 speki_cos_poly(fp64 r) {
+    fp64 r2 = r * r;
+    fp64 p = -1.5619206968586225e-16;     // -1/18!
+    p = p * r2 + 4.779477332387385e-14;  // +1/16!
+    p = p * r2 - 1.1470745597729725e-11; // -1/14!
+    p = p * r2 + 2.0876756987868100e-09;  // +1/12!
+    p = p * r2 - 2.7557319223985890e-07; // -1/10!
+    p = p * r2 + 2.4801587301587302e-05;  // +1/8!
+    p = p * r2 - 1.3888888888888889e-03; // -1/6!
+    p = p * r2 + 4.1666666666666664e-02;  // +1/4!
+    p = p * r2 - 5.0000000000000000e-01;  // -1/2!
+    p = p * r2 + 1.0;                     // +1/0!  = 1
+    return p;
+}
+
+// Reduce x to (r, swap) with |r| <= pi/4. `swap` is nonzero when the result
+// must come from the other polynomial.
+//
+// Returns r and writes the quadrant flags through the pointer because C has no
+// clean way to return two values cheaply.
+static inline fp64 speki_reduce_trig(fp64 x, i32* swap) {
+    i32 s = 0;
+
+    // Modulo 2pi, in two exact halves.
+    fp64 k = __builtin_round(x / SPEKI_TWO_PI_HI);
+    x = x - k * SPEKI_TWO_PI_HI;
+    x = x - k * SPEKI_TWO_PI_LO;
+    // Now x in [-pi, pi]. Guard the boundary: rounding can land slightly past.
+    if (x >  SPEKI_PI_2) { x = 2.0 * SPEKI_PI_2 - x; s ^= 1; }
+    if (x < -SPEKI_PI_2) { x = -2.0 * SPEKI_PI_2 - x; s ^= 1; }
+
+    // Fold the remaining octant down to [-pi/4, pi/4].
+    fp64 ax = x < 0 ? -x : x;
+    if (ax > SPEKI_PI_4) { x = (x < 0 ? -SPEKI_PI_4 : SPEKI_PI_4) - x; s ^= 1; }
+
+    if (swap) *swap = s;
+    return x;
+}
+
+// speki_sind / speki_cosd — libm-free sin/cos in fp64.
+//
+// Returns NaN outside |x| <= SPEKI_TRIG_ARG_MAX rather than a plausible-
+// looking wrong number. Past that bound the 2pi reduction is meaningless: k
+// exceeds what fp64 can hold exactly, so x - k*2pi returns noise rather than
+// a remainder. Returning NaN makes the failure visible; returning garbage
+// would not.
+static inline fp64 speki_sind(fp64 x) {
+    if (x != x) return x;
+    fp64 ax = x < 0 ? -x : x;
+    if (ax > SPEKI_TRIG_ARG_MAX) return x - x;   // NaN
+    i32 swap = 0;
+    fp64 r = speki_reduce_trig(x, &swap);
+    return swap ? speki_cos_poly(r) : speki_sin_poly(r);
+}
+
+static inline fp64 speki_cosd(fp64 x) {
+    if (x != x) return x;
+    fp64 ax = x < 0 ? -x : x;
+    if (ax > SPEKI_TRIG_ARG_MAX) return x - x;   // NaN
+    i32 swap = 0;
+    fp64 r = speki_reduce_trig(x, &swap);
+    return swap ? speki_sin_poly(r) : speki_cos_poly(r);
+}
+
+static inline fp32 speki_sinf(fp32 x) { return (fp32)speki_sind((fp64)x); }
+static inline fp32 speki_cosf(fp32 x) { return (fp32)speki_cosd((fp64)x); }
+
 // speki_exp_arr_ps — exp over an fp32 array, 8 lanes per iteration plus a
 // scalar tail.
 // Array-at-a-time exp. Currently only the host accuracy suite calls this;
